@@ -64,9 +64,10 @@ iptables -X
 iptables -A INPUT  -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# 3) DNS to the container's resolver (Docker injects nameservers; let queries through).
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+# 3) DNS — pinned to Docker's embedded resolver only (127.0.0.11).
+# Allowing :53 to anywhere would open a DNS-tunnel exfiltration channel.
+iptables -A OUTPUT -p udp -d 127.0.0.11 --dport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp -d 127.0.0.11 --dport 53 -j ACCEPT
 
 # 4) Allow established/related (so responses to our outbound requests come back).
 iptables -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -101,5 +102,17 @@ iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 iptables -P INPUT DROP
 iptables -P OUTPUT DROP
 iptables -P FORWARD DROP
+
+# 8) IPv6 belt-and-suspenders: even though compose disables IPv6 via sysctls,
+# also DROP at the ip6tables policy level so any future config slip is caught.
+# Skip gracefully if ip6tables isn't present (kernel without v6).
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -F 2>/dev/null || true
+    ip6tables -X 2>/dev/null || true
+    ip6tables -P INPUT DROP   2>/dev/null || true
+    ip6tables -P OUTPUT DROP  2>/dev/null || true
+    ip6tables -P FORWARD DROP 2>/dev/null || true
+    log "ip6tables: default-deny applied"
+fi
 
 log "ready — ${#ALLOWED_DOMAINS[@]} domains, $resolved_total IPs in allowlist"

@@ -11,7 +11,17 @@
 set -euo pipefail
 
 if [[ "${PI_DISABLE_FIREWALL:-0}" == "1" ]]; then
-    echo "[entrypoint] PI_DISABLE_FIREWALL=1 — skipping firewall init" >&2
+    # Loud banner — easy to miss a single log line in pi's TUI output.
+    cat >&2 <<'EOF'
+
+    ╔═══════════════════════════════════════════════════════════╗
+    ║  WARNING: PI_DISABLE_FIREWALL=1 — egress is UNRESTRICTED  ║
+    ║  This container can reach any host on the internet.       ║
+    ║  Only use this for debugging. Remove --no-firewall to     ║
+    ║  restore the allowlist.                                   ║
+    ╚═══════════════════════════════════════════════════════════╝
+
+EOF
 else
     /usr/local/bin/init-firewall.sh
 fi

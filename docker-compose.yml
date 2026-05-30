@@ -1,8 +1,11 @@
-# pi-dev container — invoked by scripts/spawn.sh with HOST_DEV_DIR and
-# WORKTREE_NAME set so the worktree at $HOME/dev/pi-dev-worktrees/$BRANCH
-# becomes /workspace inside the container at the SAME absolute path.
+# pi-dev container — invoked by scripts/spawn.sh. spawn.sh sets:
+#   HOST_PI_DEV         absolute path to host's pi-dev checkout
+#   HOST_WORKTREES_DIR  absolute path to ../pi-dev-worktrees
+#   WORKTREE_NAME       branch name (sanitized)
+#   PI_UID / PI_GID     for file-ownership matching
+#   PI_DISABLE_FIREWALL only set to 1 when spawn.sh saw `--no-firewall`
 #
-# Run it via:
+# Run via:
 #   ./scripts/spawn.sh <branch> --docker
 # not via raw `docker compose run` — spawn.sh sets the required env.
 
@@ -45,6 +48,14 @@ services:
     cpus: 2.0
     init: true
 
+    # IPv6 fully disabled inside the container. The firewall only manages
+    # IPv4 (ipset family inet); without disabling v6 the agent could reach
+    # any AAAA-bearing host straight through the v6 stack.
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+      net.ipv6.conf.default.disable_ipv6: "1"
+      net.ipv6.conf.lo.disable_ipv6: "1"
+
     # Writable tmpfs for anywhere pi might want to write outside the worktree
     # and outside ~/.pi (which is bind-mounted from host). Sized small to bound
     # runaway disk usage. Everything in tmpfs vanishes on exit.
@@ -63,27 +74,34 @@ services:
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
       # Make pi/git happier when the parent shell isn't a TTY.
       TERM: "${TERM:-xterm-256color}"
-      # Forwarded to the entrypoint. Set to 1 to skip firewall init (debug).
+      # Set by spawn.sh ONLY when --no-firewall was passed. Don't inherit
+      # silently from the operator's shell — spawn.sh forces this to "0"
+      # otherwise so the container env never sees an inherited "1".
       PI_DISABLE_FIREWALL: "${PI_DISABLE_FIREWALL:-0}"
 
     volumes:
-      # Match-host-path mount of the entire dev directory so worktree .git
-      # files (which contain absolute paths to the main repo's
-      # .git/worktrees/<name>) resolve without rewriting.
-      - "${HOST_DEV_DIR:?HOST_DEV_DIR must be set by spawn.sh}:${HOST_DEV_DIR}:rw"
+      # Two scoped bind mounts at MATCHING absolute paths so worktree .git
+      # gitdir pointers (absolute references to .git/worktrees/<name>) resolve
+      # naturally. Important: we do NOT mount the entire ${HOME}/dev tree;
+      # the agent only sees pi-dev and pi-dev-worktrees, not sibling repos.
+      - "${HOST_PI_DEV:?HOST_PI_DEV must be set by spawn.sh}:${HOST_PI_DEV}:rw"
+      - "${HOST_WORKTREES_DIR:?HOST_WORKTREES_DIR must be set by spawn.sh}:${HOST_WORKTREES_DIR}:rw"
 
-      # Host gitconfig so commits get the right author identity.
-      # Read-only so the agent can't rewrite global git settings.
+      # Host gitconfig so commits get the right author identity. Read-only so
+      # the agent can't rewrite global git settings. (Worktree-local config
+      # is still writable; spawn.sh/reap.sh neutralize hookspath there.)
       - "${HOME}/.gitconfig:/home/pi/.gitconfig:ro"
 
-      # Host ~/.pi for OAuth credentials, sessions, and any globally-installed
-      # pi config. RW so OAuth token refresh works. Tradeoff: the agent in the
-      # container can modify your host pi state. spawn.sh ensures the dir
-      # exists before starting the container.
+      # Host ~/.pi for OAuth credentials and sessions — RW so token refresh
+      # works. The agent CAN write here (credentials, session blobs).
       - "${HOME}/.pi:/home/pi/.pi:rw"
+      # ...but ~/.pi/agent (skills, extensions, settings.json) is overlaid
+      # RO. The agent reads them live from host but cannot plant a malicious
+      # skill that would run on the next host-mode pi invocation.
+      - "${HOME}/.pi/agent:/home/pi/.pi/agent:ro"
 
     # Drop the agent into the worktree, not the image's default WORKDIR.
-    working_dir: "${HOST_DEV_DIR}/pi-dev-worktrees/${WORKTREE_NAME:?WORKTREE_NAME must be set by spawn.sh}"
+    working_dir: "${HOST_WORKTREES_DIR}/${WORKTREE_NAME:?WORKTREE_NAME must be set by spawn.sh}"
 
     stdin_open: true
     tty: true

@@ -11,8 +11,12 @@ extensions, plus a Docker + git-worktree workflow for developing them safely.
 - **Worktree-per-feature**: each session works on its own branch in its own
   directory; `main` stays clean; multiple sessions can run in parallel.
 - **Safety baseline** for the container: non-root user, read-only root fs,
-  dropped capabilities, no-new-privileges, resource limits, **egress firewall
-  with an LLM/git/npm allowlist** (Anthropic-style iptables + ipset).
+  dropped capabilities, no-new-privileges, resource limits, **IPv4 egress
+  firewall** with an LLM/git/npm allowlist (Anthropic-style iptables + ipset),
+  IPv6 disabled, DNS pinned to Docker's embedded resolver, narrowed
+  bind-mounts (only `pi-dev` and `pi-dev-worktrees`, not your whole `~/dev`),
+  `~/.pi/agent` mounted RO so a compromised agent can't tamper with your
+  host pi skills/extensions.
 
 ## Prerequisites
 
@@ -72,9 +76,9 @@ can't see each other, and merge conflicts go through normal git.
 | | Host mode (default) | Docker mode (`--docker`) |
 |---|---|---|
 | Speed | Native, no container overhead | ~1s startup cost per session |
-| Filesystem reach | Anywhere your user can reach | Only the bind-mounted dev dir |
-| Network reach | Whatever your host has | Egress allowlist only — LLM APIs, OAuth login, github.com, npmjs.org. Default deny. |
-| Credentials | Your shell env + `~/.pi/` | `.env` (API keys) **and/or** host `~/.pi/` bind-mounted in (OAuth) |
+| Filesystem reach | Anywhere your user can reach | Only `~/dev/pi-dev` and `~/dev/pi-dev-worktrees`. RW on the active worktree, RW on `~/.pi` (creds/sessions), RO on `~/.pi/agent` (skills/extensions/settings). RO on `~/.gitconfig`. |
+| Network reach | Whatever your host has | IPv4 egress allowlist only — LLM APIs, OAuth login, github.com, npmjs.org. DNS pinned to Docker's resolver. IPv6 disabled. Default deny. |
+| Credentials | Your shell env + `~/.pi/` | `.env` (API keys) **and/or** host `~/.pi/` bind-mounted in (OAuth). `~/.pi/agent/` is RO so a compromised agent can't plant a skill that runs on your next host-mode pi. |
 | Killable | `pkill pi` | `docker kill` or just exit |
 | Best for | Quick edits, when you trust the task | Unattended runs, exploratory yolo, anything you'd rather not have touch host state |
 
@@ -95,11 +99,15 @@ Default allowlist (see `container/init-firewall.sh` to extend):
 - **Git/GitHub**: github.com + api/codeload/objects/raw.githubusercontent.com
 - **Packages**: registry.npmjs.org, pi.dev
 
-Escape hatch:
+Escape hatch (debugging only — prints a loud banner at boot):
 
 ```sh
-PI_DISABLE_FIREWALL=1 ./scripts/spawn.sh feat-x --docker
+./scripts/spawn.sh feat-x --docker --no-firewall
 ```
+
+Note: the env var `PI_DISABLE_FIREWALL` is **not** inherited from your
+shell — `spawn.sh` only sets it when `--no-firewall` is explicitly passed,
+so an accidental `export` in your shellrc won't silently disable the firewall.
 
 If pi needs a new destination (a new provider, a docs site, a tool that
 fetches from a CDN), add the domain to `ALLOWED_DOMAINS` in
