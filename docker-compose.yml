@@ -1,0 +1,91 @@
+# pi-dev container — invoked by scripts/spawn.sh with HOST_DEV_DIR and
+# WORKTREE_NAME set so the worktree at $HOME/dev/pi-dev-worktrees/$BRANCH
+# becomes /workspace inside the container at the SAME absolute path.
+#
+# Run it via:
+#   ./scripts/spawn.sh <branch> --docker
+# not via raw `docker compose run` — spawn.sh sets the required env.
+
+services:
+  pi:
+    build:
+      context: .
+      args:
+        UID: "${PI_UID:-501}"
+        GID: "${PI_GID:-20}"
+    image: pi-dev:local
+    # Stable hostname so `hostname` (and pi's status line) clearly says
+    # "you're in the container" instead of a random container-id hex string.
+    hostname: pi-dev
+    # No `user:` here — the container starts as root so the entrypoint can
+    # apply iptables rules, then uses `gosu` to drop to the pi user before
+    # exec'ing the actual command. Capabilities don't survive the user switch.
+
+    # --- safety primitives ---------------------------------------------------
+    # Root fs is read-only; the agent can only write to tmpfs mounts and to
+    # /workspace (which is the worktree bind-mount). The container is the
+    # security boundary, so pi can run in "yolo" mode safely.
+    read_only: true
+    cap_drop:
+      - ALL
+    # Capabilities needed only by the root-side entrypoint:
+    #   NET_ADMIN, NET_RAW  — install the iptables egress allowlist
+    #   SETUID, SETGID      — let `gosu` switch root → pi before exec'ing pi
+    # All four are dropped by the kernel when gosu calls setuid(), so the pi
+    # process itself runs with no capabilities at all.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    init: true
+
+    # Writable tmpfs for anywhere pi might want to write outside the worktree
+    # and outside ~/.pi (which is bind-mounted from host). Sized small to bound
+    # runaway disk usage. Everything in tmpfs vanishes on exit.
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /home/pi/.cache:size=256m,uid=${PI_UID:-501},gid=${PI_GID:-20},mode=0755
+      - /home/pi/.npm:size=128m,uid=${PI_UID:-501},gid=${PI_GID:-20},mode=0755
+
+    environment:
+      # Provider API keys — pulled from host .env (loaded by spawn.sh).
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      # Reserved for future PR-flavored skills; unused by initial scaffold.
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      # Make pi/git happier when the parent shell isn't a TTY.
+      TERM: "${TERM:-xterm-256color}"
+      # Forwarded to the entrypoint. Set to 1 to skip firewall init (debug).
+      PI_DISABLE_FIREWALL: "${PI_DISABLE_FIREWALL:-0}"
+
+    volumes:
+      # Match-host-path mount of the entire dev directory so worktree .git
+      # files (which contain absolute paths to the main repo's
+      # .git/worktrees/<name>) resolve without rewriting.
+      - "${HOST_DEV_DIR:?HOST_DEV_DIR must be set by spawn.sh}:${HOST_DEV_DIR}:rw"
+
+      # Host gitconfig so commits get the right author identity.
+      # Read-only so the agent can't rewrite global git settings.
+      - "${HOME}/.gitconfig:/home/pi/.gitconfig:ro"
+
+      # Host ~/.pi for OAuth credentials, sessions, and any globally-installed
+      # pi config. RW so OAuth token refresh works. Tradeoff: the agent in the
+      # container can modify your host pi state. spawn.sh ensures the dir
+      # exists before starting the container.
+      - "${HOME}/.pi:/home/pi/.pi:rw"
+
+    # Drop the agent into the worktree, not the image's default WORKDIR.
+    working_dir: "${HOST_DEV_DIR}/pi-dev-worktrees/${WORKTREE_NAME:?WORKTREE_NAME must be set by spawn.sh}"
+
+    stdin_open: true
+    tty: true
+
+    command: ["pi"]

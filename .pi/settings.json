@@ -1,0 +1,7 @@
+{
+  "defaultProvider": "anthropic",
+  "quietStartup": false,
+  "extensions": [],
+  "skills": [],
+  "packages": []
+}

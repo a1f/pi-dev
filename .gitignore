@@ -1,0 +1,25 @@
+# secrets
+.env
+.env.local
+*.pem
+*.key
+
+# node
+node_modules/
+npm-debug.log*
+.npm/
+
+# pi runtime state (per-worktree, lives inside the worktree, not in main)
+.pi/sessions/
+.pi/cache/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# build / logs
+dist/
+build/
+*.log
