@@ -151,17 +151,12 @@ if $USE_DOCKER; then
         exit 127
     fi
 
-    # First-time bind-mount source ensures (with a visible heads-up so we
-    # don't silently mutate host state):
+    # Ensure all bind-mount sources exist on host (compose errors if missing).
+    # ~/.pi/agent/skills and extensions are RO-mounted into the container.
     if [[ ! -d "$HOME/.pi" ]]; then
         echo "spawn: creating $HOME/.pi (mount source needed; first-time setup)"
-        mkdir -p "$HOME/.pi"
     fi
-    if [[ ! -d "$HOME/.pi/agent" ]]; then
-        # The agent/ dir is RO-mounted into the container. If it doesn't
-        # exist on host, the mount errors. Create it empty for the user.
-        mkdir -p "$HOME/.pi/agent"
-    fi
+    mkdir -p "$HOME/.pi/agent/skills" "$HOME/.pi/agent/extensions"
     if [[ ! -f "$HOME/.gitconfig" ]]; then
         echo "spawn: creating empty $HOME/.gitconfig (mount source needed)"
         : > "$HOME/.gitconfig"

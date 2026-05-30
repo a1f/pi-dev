@@ -92,13 +92,17 @@ services:
       # is still writable; spawn.sh/reap.sh neutralize hookspath there.)
       - "${HOME}/.gitconfig:/home/pi/.gitconfig:ro"
 
-      # Host ~/.pi for OAuth credentials and sessions — RW so token refresh
-      # works. The agent CAN write here (credentials, session blobs).
+      # Host ~/.pi mounted RW so OAuth token refresh and session writes work
+      # (~/.pi/agent/auth.json and ~/.pi/agent/sessions/ are runtime state).
       - "${HOME}/.pi:/home/pi/.pi:rw"
-      # ...but ~/.pi/agent (skills, extensions, settings.json) is overlaid
-      # RO. The agent reads them live from host but cannot plant a malicious
-      # skill that would run on the next host-mode pi invocation.
-      - "${HOME}/.pi/agent:/home/pi/.pi/agent:ro"
+      # Only the two subdirs an attacker would plant code in get overlaid RO:
+      # skills/ and extensions/ (the loadable-code paths). The agent can still
+      # read them live from host, just can't write back. settings.json and
+      # auth.json remain writable; the impact of agent mutating those is bounded.
+      # spawn.sh ensures both dirs exist before mount so this doesn't error
+      # on a fresh host install.
+      - "${HOME}/.pi/agent/skills:/home/pi/.pi/agent/skills:ro"
+      - "${HOME}/.pi/agent/extensions:/home/pi/.pi/agent/extensions:ro"
 
     # Drop the agent into the worktree, not the image's default WORKDIR.
     working_dir: "${HOST_WORKTREES_DIR}/${WORKTREE_NAME:?WORKTREE_NAME must be set by spawn.sh}"

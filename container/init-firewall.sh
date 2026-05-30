@@ -64,10 +64,27 @@ iptables -X
 iptables -A INPUT  -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# 3) DNS — pinned to Docker's embedded resolver only (127.0.0.11).
-# Allowing :53 to anywhere would open a DNS-tunnel exfiltration channel.
-iptables -A OUTPUT -p udp -d 127.0.0.11 --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp -d 127.0.0.11 --dport 53 -j ACCEPT
+# 3) DNS — only to nameserver(s) actually listed in /etc/resolv.conf.
+# Linux Docker uses 127.0.0.11 (embedded resolver). macOS Docker Desktop uses
+# 192.168.65.x (vpnkit gateway). Pinning either statically breaks the other.
+# Pinning to the listed resolver still narrows the DNS-tunnel exfil surface
+# (single operator-controlled destination) without hardcoding a platform.
+if [[ -r /etc/resolv.conf ]]; then
+    dns_count=0
+    while IFS= read -r ns; do
+        # IPv4 only — IPv6 is disabled at the sysctl/ip6tables layer.
+        [[ "$ns" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+        iptables -A OUTPUT -p udp -d "$ns" --dport 53 -j ACCEPT
+        iptables -A OUTPUT -p tcp -d "$ns" --dport 53 -j ACCEPT
+        log "  DNS allow → $ns"
+        dns_count=$((dns_count + 1))
+    done < <(awk '/^nameserver /{print $2}' /etc/resolv.conf)
+    if [[ "$dns_count" == "0" ]]; then
+        log "WARN: /etc/resolv.conf had no IPv4 nameservers — DNS will not work"
+    fi
+else
+    log "WARN: /etc/resolv.conf missing — DNS will not work"
+fi
 
 # 4) Allow established/related (so responses to our outbound requests come back).
 iptables -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
