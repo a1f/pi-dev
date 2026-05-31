@@ -6,7 +6,7 @@
   "description": "pi customizations for pi-dev: extensions, tools, skills.",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test"
+    "test": "node --test '.pi/extensions/**/*.test.ts'"
   },
   "dependencies": {
     "yaml": "^2.5.0"
