@@ -1,0 +1,80 @@
+# guardrails rules — project scope for pi-dev.
+#
+# Loaded by .pi/extensions/guardrails. Threat model: our own honest mistakes,
+# not an adversary — a VM is the real isolation boundary, this is the in-VM net.
+#
+# mode: continue = block the call but tell the agent to adapt and keep working.
+#       abort     = hard-stop the turn and notify the user.
+#
+# NOTE: this is the ruleset for developing pi-dev *itself*, so it intentionally
+# does NOT lock .pi/extensions/guardrails (we edit it here). Put self-protection
+# of the guardrails files in your global ~/.pi/guardrails.yaml for other repos.
+
+mode: continue
+
+# Never read, write, or reference these (secrets / credentials).
+zeroAccessPaths:
+  - .env
+  - .env.*
+  - "*.pem"
+  - "*.key"
+  - "*.p12"
+  - "*.pfx"
+  - "*-credentials.json"
+  - "*serviceAccount*.json"
+  - id_rsa
+  - id_ed25519
+  - "~/.ssh/"
+  - "~/.aws/"
+  - "~/.gnupg/"
+  - "~/.kube/"
+  - "~/.config/gcloud/"
+  - "~/.npmrc"
+  - "~/.netrc"
+  - "~/.git-credentials"
+  - .git-credentials
+
+# Readable, but don't overwrite (generated / lockfiles / vcs internals).
+readOnlyPaths:
+  - package-lock.json
+  - "*.lock"
+  - .git/
+
+# Don't delete or move these.
+noDeletePaths:
+  - .git/
+  - LICENSE
+  - README.md
+
+# Irreversible or outward-reaching commands. These escape the VM, so a snapshot
+# can't undo them — the highest-value rules in the stupidity threat model.
+bashToolPatterns:
+  - pattern: '\bgit\s+push\s+.*--force(?!-with-lease)'
+    reason: git push --force (use --force-with-lease)
+  - pattern: '\bgit\s+push\s+(-[^\s]*)*-f\b'
+    reason: git push -f (use --force-with-lease)
+  - pattern: '\bgit\s+reset\s+--hard\b'
+    reason: git reset --hard (loses uncommitted work)
+    ask: true
+  - pattern: '\bgit\s+clean\s+(-[^\s]*)*-[fd]'
+    reason: git clean -fd (deletes untracked files)
+    ask: true
+  - pattern: '\bgit\s+filter-branch\b'
+    reason: git filter-branch (rewrites history)
+  - pattern: '\bgit\s+reflog\s+expire\b'
+    reason: git reflog expire (destroys recovery)
+  - pattern: '\brm\s+-[a-z]*[rf]'
+    reason: rm -rf (recursive / forced delete)
+    ask: true
+  - pattern: '\bgh\s+repo\s+delete\b'
+    reason: gh repo delete
+  - pattern: '\bnpm\s+publish\b'
+    reason: npm publish (irreversible release)
+  - pattern: '\baws\s+s3\s+rm\s+.*--recursive'
+    reason: aws s3 rm --recursive
+  - pattern: '\baws\s+(ec2\s+terminate-instances|rds\s+delete-db-instance|cloudformation\s+delete-stack|dynamodb\s+delete-table)\b'
+    reason: destructive AWS delete
+  - pattern: '\bgcloud\s+.*\bdelete\b'
+    reason: gcloud delete
+  - pattern: '\b(vercel|netlify)\s+.*\b(rm|remove|delete)\b'
+    reason: deployment delete

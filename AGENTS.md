@@ -58,14 +58,14 @@ agent run.
 
 ## What's intentionally not here yet
 
-This scaffold is infrastructure only (Docker, worktrees, dev scripts,
-safety baseline including the firewall). Coming later, as separate PRs:
+The `guardrails` extension (`.pi/extensions/guardrails/`, rules in
+`.pi/guardrails.yaml`) is the first real customization — an in-VM safety net
+over the agent's own tool calls. See the README for details.
 
-- pi permission/path-protection config (`.pi/permissions.json`)
+Still coming later, as separate PRs:
+
 - PR-flavored skills (babysit, comments, make-pr) wired to a scoped GitHub PAT
-- Actual skills, agents, and extensions
-
-Build them as you need them, not preemptively.
+- More skills, agents, and extensions — built as needed, not preemptively
 
 ## Adding network destinations
 

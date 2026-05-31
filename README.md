@@ -118,11 +118,39 @@ Included:
 - `.pi/settings.json` — minimal pi config.
 - `AGENTS.md` — project-level instructions pi reads at startup.
 
-Deliberately not included yet (each will be its own follow-up):
+The first real extension, [`guardrails`](#the-guardrails-extension), has landed
+(see below). Deliberately not included yet (each will be its own follow-up):
 
-- Pi permission/path-protection layer (`.pi/permissions.json`).
 - PR-flavored skills (babysit, comments, make-pr) + GitHub PAT wiring.
-- Any actual skills, agents, or extensions — those grow as needs arise.
+- More skills, agents, and extensions — those grow as needs arise.
+
+## The `guardrails` extension
+
+`.pi/extensions/guardrails/` is an in-VM safety net that intercepts the agent's
+own tool calls and blocks the dangerous or protected ones — reading secrets,
+overwriting generated files, and irreversible/outward commands (force-push,
+remote/cloud deletes, `npm publish`). Every decision is written to a
+`guardrails-log` session entry. The threat model is *our own honest mistakes*,
+not an adversary; a VM is the real isolation boundary.
+
+Rules live in `.pi/guardrails.yaml` (project) or `~/.pi/guardrails.yaml`
+(global), with four buckets — `zeroAccessPaths`, `readOnlyPaths`,
+`noDeletePaths`, `bashToolPatterns` — and a `mode`:
+
+- `continue` (default) — block the call but hand the agent feedback so it adapts.
+- `abort` — hard-stop the turn and notify you.
+
+Develop it like any TypeScript:
+
+```sh
+npm install        # once
+npm run typecheck  # tsc --noEmit (strict)
+npm test           # node --test (pure core: match / rules / evaluate / feedback)
+```
+
+The pure policy core (`match.ts`, `rules.ts`, `evaluate.ts`) has no pi
+dependency, so it's unit-tested without launching the agent; `adapter.ts` is the
+only pi-coupled seam and `index.ts` wires it in.
 
 ## References
 
