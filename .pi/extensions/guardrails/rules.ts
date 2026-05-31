@@ -1,8 +1,8 @@
-// Rule types + loading/compilation for damage-control.
+// Rule types + loading/compilation for guardrails.
 //
-// Rules live in `<cwd>/.pi/damage-control-rules.yaml` (project) with a fallback
-// to `~/.pi/damage-control-rules.yaml` (global). Bash regexes are compiled once,
-// and a bad pattern is dropped with a warning rather than crashing the agent.
+// Rules live in `<cwd>/.pi/guardrails.yaml` (project) with a fallback to
+// `~/.pi/guardrails.yaml` (global). Bash regexes are compiled once, and a bad
+// pattern is dropped with a warning rather than crashing the agent.
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -47,7 +47,7 @@ export interface LoadResult {
 	readonly warnings: readonly string[];
 }
 
-export const RULES_FILENAME = "damage-control-rules.yaml";
+export const RULES_FILENAME = "guardrails.yaml";
 
 export const EMPTY_RULES: CompiledRules = {
 	mode: "continue",

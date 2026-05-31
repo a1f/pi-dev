@@ -1,4 +1,4 @@
-// Path and command matching for damage-control.
+// Path and command matching for guardrails.
 //
 // Pure helpers, no pi coupling, so the policy can be unit-tested in isolation.
 // All matching is heuristic by design: the threat model is the agent's own
