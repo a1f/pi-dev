@@ -64,8 +64,9 @@ export function formatSearchResults(results: SearchResult[]): string {
     .join("\n\n");
 }
 
-// Generic JSON fetch: combines the caller's signal with a timeout, enforces
-// res.ok, and parses the body. web_read will reuse this later.
+// Generic JSON fetch shared by web_search and web_read: combines the caller's
+// signal with a timeout, enforces res.ok, and parses the body. Error messages
+// carry only the host and provider response — never request headers/keys.
 async function fetchJson(
   url: string,
   opts: { headers: Record<string, string>; signal?: AbortSignal; timeoutMs: number },
@@ -78,17 +79,38 @@ async function fetchJson(
     const body = (await res.text().catch(() => "")).slice(0, ERROR_BODY_SNIPPET_CHARS);
     throw new Error(`Request failed: ${res.status} ${res.statusText} ${body}`);
   }
-  return res.json();
+  try {
+    return await res.json();
+  } catch {
+    // A 200 with an empty/non-JSON body otherwise surfaces as a raw SyntaxError.
+    throw new Error(`Invalid JSON response from ${new URL(url).host} (${res.status})`);
+  }
 }
 
-function clampCount(count: number | undefined): number {
-  if (typeof count !== "number" || Number.isNaN(count)) return DEFAULT_COUNT;
+export function clampCount(count: number | undefined): number {
+  if (typeof count !== "number" || !Number.isFinite(count)) return DEFAULT_COUNT;
   return Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.trunc(count)));
 }
 
 export function clampTokens(tokens: number | undefined): number {
-  if (typeof tokens !== "number" || Number.isNaN(tokens)) return DEFAULT_MAX_TOKENS;
+  if (typeof tokens !== "number" || !Number.isFinite(tokens)) return DEFAULT_MAX_TOKENS;
   return Math.max(MIN_MAX_TOKENS, Math.trunc(tokens));
+}
+
+// Reject blank / scheme-less / non-http(s) input with a clear local error
+// rather than forwarding it raw to Jina as an opaque upstream failure.
+export function validateReadUrl(url: string): string {
+  const target = url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(target);
+  } catch {
+    throw new Error("web_read requires a valid absolute URL (e.g. https://example.com/page)");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("web_read only supports http(s) URLs");
+  }
+  return target;
 }
 
 // Jina expects the target URL appended raw (not percent-encoded) to the base.
@@ -208,11 +230,11 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      if (!params.url.trim()) throw new Error("web_read requires a non-empty url");
+      const target = validateReadUrl(params.url);
       // JINA_API_KEY is optional: keyless r.jina.ai works, so we never throw on absence.
       const key = process.env.JINA_API_KEY;
       const maxTokens = clampTokens(params.max_tokens);
-      const url = buildJinaUrl(params.url);
+      const url = buildJinaUrl(target);
       const json = await fetchJson(url, {
         headers: buildJinaHeaders(maxTokens, key),
         signal,
