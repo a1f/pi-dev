@@ -95,14 +95,17 @@ services:
       # Host ~/.pi mounted RW so OAuth token refresh and session writes work
       # (~/.pi/agent/auth.json and ~/.pi/agent/sessions/ are runtime state).
       - "${HOME}/.pi:/home/pi/.pi:rw"
-      # Only the two subdirs an attacker would plant code in get overlaid RO:
-      # skills/ and extensions/ (the loadable-code paths). The agent can still
-      # read them live from host, just can't write back. settings.json and
-      # auth.json remain writable; the impact of agent mutating those is bounded.
-      # spawn.sh ensures both dirs exist before mount so this doesn't error
-      # on a fresh host install.
+      # Three paths the agent could weaponize get overlaid RO on top:
+      #   skills/       — loadable code paths (per /skill:name invocation)
+      #   extensions/   — TS code loaded at session start
+      #   settings.json — provider config; agent could otherwise add a fake
+      #                   provider with baseURL=https://attacker and the
+      #                   operator's next host-mode pi run would silently
+      #                   exfil every prompt + the host's API keys.
+      # spawn.sh ensures all three mount sources exist before launch.
       - "${HOME}/.pi/agent/skills:/home/pi/.pi/agent/skills:ro"
       - "${HOME}/.pi/agent/extensions:/home/pi/.pi/agent/extensions:ro"
+      - "${HOME}/.pi/agent/settings.json:/home/pi/.pi/agent/settings.json:ro"
 
     # Drop the agent into the worktree, not the image's default WORKDIR.
     working_dir: "${HOST_WORKTREES_DIR}/${WORKTREE_NAME:?WORKTREE_NAME must be set by spawn.sh}"

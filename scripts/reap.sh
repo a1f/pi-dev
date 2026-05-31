@@ -22,14 +22,22 @@ EOF
 }
 
 # --- git wrapper: neutralize attacker-controlled worktree config -----------
-# Every host-side git invocation on a worktree path goes through this.
-# Worktree-local config is writable from inside the container, so the agent
-# can plant `core.hooksPath` / `core.fsmonitor` and trigger host RCE on the
-# next `git diff` / `git rev-parse` etc. These -c flags neutralize both.
+# Kept in sync with the wrapper in spawn.sh. Worktree-local git config is
+# writable from inside the container; without these overrides a malicious
+# core.hooksPath, core.sshCommand, core.editor, core.pager, etc. would
+# trigger host RCE on the next host-side `git diff` / `worktree remove` etc.
+# GIT_CONFIG_NOSYSTEM also drops /etc/gitconfig as defense-in-depth.
 git_safe() {
+    GIT_CONFIG_NOSYSTEM=1 \
     git \
         -c core.hooksPath=/dev/null \
         -c core.fsmonitor= \
+        -c core.sshCommand=/bin/false \
+        -c core.editor=/bin/false \
+        -c core.pager=cat \
+        -c core.askpass=/bin/false \
+        -c credential.helper= \
+        -c gpg.program=/bin/true \
         -c protocol.file.allow=user \
         "$@"
 }
@@ -71,17 +79,27 @@ list_worktrees() {
     printf '%-32s  %-10s  %-10s  %s\n' BRANCH DIRTY MERGED PATH
     while IFS= read -r line; do
         local wt_path="${line%% *}"
-        local branch
+        # Path-prefix filter: only worktrees that are STRICTLY children of
+        # $WORKTREES_DIR. The previous `grep -F` was a substring match and
+        # would have matched a sibling like `pi-dev-worktrees-archive/foo`.
+        [[ "$wt_path" == "$WORKTREES_DIR"/* ]] || continue
+
+        local branch dirty merged
         branch="$(git_safe -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-        local dirty="clean"
+        if [[ "$branch" == "HEAD" ]]; then
+            # Detached HEAD: rev-parse returns the literal "HEAD". Treat as
+            # detached so the "merged" check (which would have looked up
+            # refs/heads/HEAD and silently said no) doesn't mislead.
+            branch="(detached)"
+            merged="n/a"
+        else
+            if is_merged "$branch"; then merged="yes"; else merged="no"; fi
+        fi
+        dirty="clean"
         if is_dirty "$wt_path"; then dirty="DIRTY"; fi
-        local merged="no"
-        if is_merged "$branch"; then merged="yes"; fi
         printf '%-32s  %-10s  %-10s  %s\n' "$branch" "$dirty" "$merged" "$wt_path"
     done < <(git_safe -C "$REPO_ROOT" worktree list --porcelain \
-                | awk '/^worktree /{print $2}' \
-                | grep -F "$WORKTREES_DIR" \
-                || true)
+                | awk '/^worktree /{print $2}')
 }
 
 remove_one() {
@@ -103,10 +121,11 @@ remove_one() {
         git_safe -C "$REPO_ROOT" worktree remove "$wt_path"
     fi
 
-    # Best-effort branch delete. -D so it works even if not fully merged
-    # (the worktree's existence is enough signal that the user wanted it gone).
+    # Best-effort branch delete. Silence stderr so the case "branch is
+    # currently checked out elsewhere" doesn't spam — the worktree is gone,
+    # which is what reap is here for.
     if git_safe -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch"; then
-        git_safe -C "$REPO_ROOT" branch -D "$branch" >/dev/null
+        git_safe -C "$REPO_ROOT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
 
     echo "reap: removed $branch"

@@ -76,9 +76,9 @@ can't see each other, and merge conflicts go through normal git.
 | | Host mode (default) | Docker mode (`--docker`) |
 |---|---|---|
 | Speed | Native, no container overhead | ~1s startup cost per session |
-| Filesystem reach | Anywhere your user can reach | Only `~/dev/pi-dev` and `~/dev/pi-dev-worktrees`. RW on the active worktree, RW on `~/.pi` (creds, sessions, settings). RO on `~/.pi/agent/skills` and `~/.pi/agent/extensions` (the loadable-code paths). RO on `~/.gitconfig`. |
+| Filesystem reach | Anywhere your user can reach | Only `~/dev/pi-dev` and `~/dev/pi-dev-worktrees`. RW on the active worktree, RW on `~/.pi` (creds, sessions). RO on `~/.pi/agent/skills`, `~/.pi/agent/extensions`, and `~/.pi/agent/settings.json` (loadable-code paths + provider config). RO on `~/.gitconfig`. |
 | Network reach | Whatever your host has | IPv4 egress allowlist only — LLM APIs, OAuth login, github.com, npmjs.org. DNS pinned to Docker's resolver. IPv6 disabled. Default deny. |
-| Credentials | Your shell env + `~/.pi/` | `.env` (API keys) **and/or** host `~/.pi/` bind-mounted in (OAuth refresh works). The skills and extensions subdirs are RO so a compromised agent can't plant loadable code that would run on your next host-mode pi. |
+| Credentials | Your shell env + `~/.pi/` | `.env` (API keys) **and/or** host `~/.pi/` bind-mounted in (OAuth refresh works). Skills, extensions, and settings.json are RO so a compromised agent can't plant loadable code or rewrite the provider config to exfil your keys to its own endpoint. |
 | Killable | `pkill pi` | `docker kill` or just exit |
 | Best for | Quick edits, when you trust the task | Unattended runs, exploratory yolo, anything you'd rather not have touch host state |
 
