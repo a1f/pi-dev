@@ -1,0 +1,29 @@
+prompt: |
+  Add a CLI subcommand `tasks tag <tag-name>` that lists every task carrying
+  the given tag. Hook it into the existing `cli.main` dispatcher. Make sure
+  the new behavior is tested.
+
+  Follow the project's Python coding rules (see AGENTS.md). Make sure ruff,
+  mypy strict, and pytest all pass.
+
+expected_files:
+  - src/tasks/cli.py
+  - tests/
+
+timeout_seconds: 600
+
+rubric:
+  hard:
+    - ruff
+    - mypy
+    - pytest
+    - keyword_only_args
+    - no_typing_legacy
+    - init_empty
+    - constants_in_constants_py
+  soft:
+    - reused_find_by_tag_helper
+    - did_not_reimplement_tag_filter
+    - new_test_for_tag_subcommand
+    - no_slop_comments
+    - reasonable_function_size

@@ -1,0 +1,30 @@
+prompt: |
+  Add a Priority enum to the tasks library with values LOW, MEDIUM, HIGH
+  (in ascending order). Then add a `priority: Priority` field to the Task
+  dataclass, defaulting to MEDIUM. Update the existing tests so they keep
+  passing, and add at least one new test that exercises the new field.
+
+  Follow the project's Python coding rules (see AGENTS.md). Make sure ruff,
+  mypy strict, and pytest all pass.
+
+expected_files:
+  - src/tasks/types.py
+  - tests/
+
+timeout_seconds: 600
+
+rubric:
+  hard:
+    - ruff
+    - mypy
+    - pytest
+    - keyword_only_args
+    - no_typing_legacy
+    - init_empty
+    - dataclasses_in_types_py
+  soft:
+    - priority_enum_defined_in_types_py
+    - priority_field_default_is_medium
+    - new_test_exercises_priority_field
+    - no_slop_comments
+    - reasonable_function_size

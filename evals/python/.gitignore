@@ -1,0 +1,7 @@
+# Per-run artifacts — never committed
+results/*.json
+fixture/.venv/
+fixture/.pytest_cache/
+fixture/.mypy_cache/
+fixture/.ruff_cache/
+fixture/**/__pycache__/
