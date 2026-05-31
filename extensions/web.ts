@@ -170,6 +170,7 @@ export default function (pi: ExtensionAPI) {
       if (!key) {
         throw new Error("BRAVE_API_KEY is not set; web_search requires a Brave Search API key");
       }
+      if (!params.query.trim()) throw new Error("web_search requires a non-empty query");
 
       const count = clampCount(params.count);
       const url = buildBraveSearchUrl(params.query, count, params.freshness);
@@ -207,6 +208,7 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      if (!params.url.trim()) throw new Error("web_read requires a non-empty url");
       // JINA_API_KEY is optional: keyless r.jina.ai works, so we never throw on absence.
       const key = process.env.JINA_API_KEY;
       const maxTokens = clampTokens(params.max_tokens);
