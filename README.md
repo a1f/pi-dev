@@ -1,140 +1,108 @@
 # pi-dev
 
-A development environment for [pi](https://pi.dev) — Mario Zechner's open-source
-coding-agent harness. This repo holds my pi skills, sub-agents, tools, and
-extensions, plus a Docker + git-worktree workflow for developing them safely.
+A development environment for [pi](https://pi.dev) — Mario Zechner's
+open-source coding-agent harness. This repo holds my pi skills, sub-agents,
+tools, and extensions, plus a git-worktree workflow for developing them
+inside a dedicated dev VM.
+
+## Trust model
+
+A persistent VM (Proxmox / similar) is the security boundary. Pi runs inside
+the VM as your normal user; sessions share the VM, share `~/.pi`, share
+provider credentials. If you want session-level isolation, run pi via
+bubblewrap/nsjail/firejail inside the VM — not in scope here.
+
+Egress allowlisting, sysctl hardening, and non-root-user setup live on the
+VM, not in this repo. See [`docs/vm-setup.md`](docs/vm-setup.md) for the
+checklist.
 
 ## What you get
 
-- **Run pi two ways**: directly on the host for fast iteration, or in an
-  isolated container for safe-yolo unattended runs. Same launcher.
 - **Worktree-per-feature**: each session works on its own branch in its own
   directory; `main` stays clean; multiple sessions can run in parallel.
-- **Safety baseline** for the container: non-root user, read-only root fs,
-  dropped capabilities, no-new-privileges, resource limits, **IPv4 egress
-  firewall** with an LLM/git/npm allowlist (Anthropic-style iptables + ipset),
-  IPv6 disabled, DNS pinned to Docker's embedded resolver, narrowed
-  bind-mounts (only `pi-dev` and `pi-dev-worktrees`, not your whole `~/dev`),
-  `~/.pi/agent` mounted RO so a compromised agent can't tamper with your
-  host pi skills/extensions.
+- **`git_safe()` wrapper** for host-side git commands so a compromised
+  session can't plant a hook in its worktree that fires when you `reap.sh`
+  a sibling session.
+- **Strict `.env` parser** (parse, don't source) so a malicious `.env` can't
+  RCE the operator's shell on the next `spawn.sh`.
 
 ## Prerequisites
 
-- **Host mode**: pi installed locally. One of:
+- A dev VM (Debian/Ubuntu recommended), provisioned per `docs/vm-setup.md`
+- `pi` on PATH inside the VM:
   ```sh
   curl -fsSL https://pi.dev/install.sh | sh
   # or
   npm install -g --ignore-scripts @earendil-works/pi-coding-agent
   ```
-- **Docker mode**: Docker Desktop (≥ 24) with `docker compose`.
-- **Either mode**: an authenticated pi. Two options, pick either:
-  - **OAuth** (Claude Pro/Max, ChatGPT Plus/Pro, Copilot subscriptions) — run
-    pi once on host and `/login`. Credentials land in `~/.pi/`, which
-    Docker mode bind-mounts in so OAuth refresh keeps working.
-  - **API keys** — copy `.env.example` to `.env` and fill in
-    `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+- An authenticated pi — either `.env` with provider API keys, or run
+  `/login` once on the VM (creds land in `~/.pi/agent/auth.json`)
 
 ## Quick start
 
 ```sh
-# If using API keys (skip if using OAuth):
-cp .env.example .env
-$EDITOR .env
+# Inside the VM:
+git clone https://github.com/a1f/pi-dev ~/dev/pi-dev
+cd ~/dev/pi-dev
+cp .env.example .env && $EDITOR .env   # if using API keys
 
-# Either mode just works:
-./scripts/spawn.sh hello                # creates branch `hello`, runs pi on host
-./scripts/spawn.sh hello --docker       # same branch, runs pi in container
-                                        # (your host ~/.pi mounts in so OAuth works)
-
-# When done:
-./scripts/reap.sh                       # list
-./scripts/reap.sh hello                 # remove the worktree + branch
+./scripts/spawn.sh hello               # creates branch `hello`, runs pi
+./scripts/reap.sh                      # list worktrees
+./scripts/reap.sh hello                # remove worktree + branch
 ```
 
 ## How the worktree flow works
 
 ```
 ~/dev/
-├── pi-dev/                       ← main checkout (this repo), never edited by agents
-│   ├── Dockerfile, scripts/, ...
+├── pi-dev/                       ← main checkout, never edited by sessions
 │   └── .git/
-└── pi-dev-worktrees/             ← sibling, created on demand by spawn.sh
-    ├── feat-x/                   ← branch feat-x, one pi session per worktree
-    └── bug-y/                    ← branch bug-y, another session
+└── pi-dev-worktrees/             ← sibling, created by spawn.sh
+    ├── feat-x/                   ← one pi session per worktree
+    └── bug-y/
 ```
 
 `spawn.sh <branch>` runs `git worktree add ../pi-dev-worktrees/<branch>` and
-then either `exec pi` (host) or `docker compose run pi` (with that worktree
-bind-mounted at the same absolute path inside the container, so the
-worktree's `.git` pointer resolves).
+then `exec pi` inside it. Multiple worktrees ↔ multiple terminals ↔
+multiple parallel pi sessions, all sharing the VM's pi installation and
+auth.
 
-You can have several worktrees and several pi sessions alive at once — they
-can't see each other, and merge conflicts go through normal git.
+## Files
 
-## Two modes side by side
-
-| | Host mode (default) | Docker mode (`--docker`) |
-|---|---|---|
-| Speed | Native, no container overhead | ~1s startup cost per session |
-| Filesystem reach | Anywhere your user can reach | Only `~/dev/pi-dev` and `~/dev/pi-dev-worktrees`. RW on the active worktree, RW on `~/.pi` (creds, sessions). RO on `~/.pi/agent/skills`, `~/.pi/agent/extensions`, and `~/.pi/agent/settings.json` (loadable-code paths + provider config). RO on `~/.gitconfig`. |
-| Network reach | Whatever your host has | IPv4 egress allowlist only — LLM APIs, OAuth login, github.com, npmjs.org. DNS pinned to Docker's resolver. IPv6 disabled. Default deny. |
-| Credentials | Your shell env + `~/.pi/` | `.env` (API keys) **and/or** host `~/.pi/` bind-mounted in (OAuth refresh works). Skills, extensions, and settings.json are RO so a compromised agent can't plant loadable code or rewrite the provider config to exfil your keys to its own endpoint. |
-| Killable | `pkill pi` | `docker kill` or just exit |
-| Best for | Quick edits, when you trust the task | Unattended runs, exploratory yolo, anything you'd rather not have touch host state |
-
-Switching modes mid-feature is fine — the worktree on host is the source of
-truth either way.
-
-## Network firewall (Docker mode)
-
-The container starts as root, runs `container/init-firewall.sh` to apply an
-iptables + ipset egress allowlist, then drops to the `pi` user via `gosu`.
-After that, capabilities are gone — pi can make HTTPS calls but only to the
-allowlisted destinations.
-
-Default allowlist (see `container/init-firewall.sh` to extend):
-
-- **LLM APIs**: Anthropic, OpenAI, Google, OpenRouter, DeepSeek, xAI, Mistral, Groq
-- **OAuth flows**: auth.openai.com, chatgpt.com, console.anthropic.com, claude.ai
-- **Git/GitHub**: github.com + api/codeload/objects/raw.githubusercontent.com
-- **Packages**: registry.npmjs.org, pi.dev
-
-Escape hatch (debugging only — prints a loud banner at boot):
-
-```sh
-./scripts/spawn.sh feat-x --docker --no-firewall
+```
+scripts/
+  spawn.sh            create worktree + launch pi
+  reap.sh             list / remove worktrees (--merged, --all)
+.pi/
+  settings.json       project-level pi config (provider, defaults)
+  skills/             project skills (loaded on /skill:name)
+  agents/             agent personas
+extensions/           project TypeScript extensions
+AGENTS.md             project instructions pi reads at startup
+docs/
+  vm-setup.md         VM hardening checklist
+.env.example          provider API key template
 ```
 
-Note: the env var `PI_DISABLE_FIREWALL` is **not** inherited from your
-shell — `spawn.sh` only sets it when `--no-firewall` is explicitly passed,
-so an accidental `export` in your shellrc won't silently disable the firewall.
+## What's NOT here
 
-If pi needs a new destination (a new provider, a docs site, a tool that
-fetches from a CDN), add the domain to `ALLOWED_DOMAINS` in
-`container/init-firewall.sh` and rebuild the image (next `--docker` run
-will rebuild automatically if the file is in the build context).
+This is just the dev-loop scaffold. Coming as needs arise:
 
-## What's in this scaffold (and what isn't)
+- Actual skills, agents, extensions
+- PR-flavored skills (babysit, comments, make-pr) + GitHub PAT wiring
+- Pi `permissions.json` once you've watched pi run enough to know what to deny
 
-Included:
+## History
 
-- `Dockerfile` — Node 22 base, pi installed globally, gh + git + ripgrep + firewall tooling, non-root `pi` user (UID matches host).
-- `docker-compose.yml` — match-host-path bind mount, read-only root, cap-drop ALL + NET_ADMIN/NET_RAW for firewall init, no-new-privileges, tmpfs for ephemeral paths, resource caps.
-- `container/entrypoint.sh` + `container/init-firewall.sh` — root-side boot: firewall, then `gosu` down to pi.
-- `scripts/spawn.sh` — worktree creator + launcher (host default, `--docker` opt-in).
-- `scripts/reap.sh` — list / remove worktrees, with merged-detection.
-- `.pi/settings.json` — minimal pi config.
-- `AGENTS.md` — project-level instructions pi reads at startup.
-
-Deliberately not included yet (each will be its own follow-up):
-
-- Pi permission/path-protection layer (`.pi/permissions.json`).
-- PR-flavored skills (babysit, comments, make-pr) + GitHub PAT wiring.
-- Any actual skills, agents, or extensions — those grow as needs arise.
+The repo previously included a Docker-based scaffold (Dockerfile,
+docker-compose, iptables egress allowlist, gosu drop-from-root, etc.) for
+running pi safely on a macOS host. With the move to a dedicated VM the
+container layer became redundant — the VM is the boundary. The Docker
+scaffold lives in git history at commit `dd7548a` if you ever need to
+revive it.
 
 ## References
 
 - [pi.dev](https://pi.dev) — official site + docs
 - [earendil-works/pi](https://github.com/earendil-works/pi) — the harness source
-- [disler/pi-vs-claude-code](https://github.com/disler/pi-vs-claude-code) — IndyDevDan's reference fork; good cribbing source for extensions and patterns
-- [Anthropic devcontainer pattern](https://code.claude.com/docs/en/sandboxing) — the inspiration for the safety baseline here
+- [disler/pi-vs-claude-code](https://github.com/disler/pi-vs-claude-code) — IndyDevDan's reference fork, source of extension patterns
