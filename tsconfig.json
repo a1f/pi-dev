@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": [".pi/extensions/**/*.ts"]
+  "include": ["extensions/**/*.ts"]
 }

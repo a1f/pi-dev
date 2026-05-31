@@ -7,7 +7,7 @@
 #       abort     = hard-stop the turn and notify the user.
 #
 # NOTE: this is the ruleset for developing pi-dev *itself*, so it intentionally
-# does NOT lock .pi/extensions/guardrails (we edit it here). Put self-protection
+# does NOT lock extensions/guardrails (we edit it here). Put self-protection
 # of the guardrails files in your global ~/.pi/guardrails.yaml for other repos.
 
 mode: continue
