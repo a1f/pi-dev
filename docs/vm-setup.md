@@ -125,15 +125,77 @@ OAuth:           auth.openai.com, chatgpt.com, console.anthropic.com, claude.ai
 Packages:        registry.npmjs.org, pi.dev
 Git/GitHub:      github.com, api.github.com, codeload.github.com,
                  objects.githubusercontent.com, raw.githubusercontent.com
+Web tools:       s.jina.ai, r.jina.ai
 ```
 
+`Web tools` covers the `web_search` (s.jina.ai) and `web_read` (r.jina.ai)
+extension. Omit the line if you don't use those tools; with it omitted and the
+firewall on, the tools fail closed (connection timeout) rather than leaking.
+
 `sudo systemctl enable --now nftables`.
+
+#### Keeping the set fresh — CDN IP rotation
+
+`allowed_domains_v4` is static: it holds the IPs you resolved when you populated
+it. CDN-fronted hosts (Jina's `s.jina.ai` / `r.jina.ai` behind Cloudflare, and
+several of the LLM APIs) rotate their IPs, so on a long-running VM the set goes
+stale and requests start timing out even though the domain is "allowed".
+Refresh it on a timer.
+
+`/usr/local/sbin/refresh-allowlist.sh` (uses `getent`, so no `dig`/dnsutils
+dependency):
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+DOMAINS=(
+    api.anthropic.com api.openai.com generativelanguage.googleapis.com
+    openrouter.ai api.deepseek.com api.x.ai api.mistral.ai api.groq.com
+    auth.openai.com chatgpt.com console.anthropic.com claude.ai
+    registry.npmjs.org pi.dev
+    github.com api.github.com codeload.github.com
+    objects.githubusercontent.com raw.githubusercontent.com
+    s.jina.ai r.jina.ai
+)
+for d in "${DOMAINS[@]}"; do
+    getent ahostsv4 "$d" | awk '{print $1}' | sort -u | while read -r ip; do
+        nft add element inet filter allowed_domains_v4 "{ $ip }" 2>/dev/null || true
+    done
+done
+```
+
+It only *adds* IPs (never prunes) — stale entries are harmless, a missing entry
+is what breaks things; a normal nftables reload flushes the set and the next
+run repopulates it. Wire it to a systemd timer:
+
+```ini
+# /etc/systemd/system/refresh-allowlist.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/refresh-allowlist.sh
+
+# /etc/systemd/system/refresh-allowlist.timer
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+sudo chmod +x /usr/local/sbin/refresh-allowlist.sh
+sudo systemctl enable --now refresh-allowlist.timer
+```
 
 ### Option B — Proxmox firewall
 
 If you're on Proxmox, do this at the hypervisor level — set up an alias for
 the allowlisted IPs in Datacenter → Firewall → Aliases, then attach a
 firewall rule to the VM. Easier to manage; survives VM-internal changes.
+
+There's no in-VM set to refresh here, so the CDN-rotation caveat above applies
+at the alias level: pin the alias to the provider's published IP ranges where
+available, or update it (manually or via the Proxmox API) on the same cadence.
 
 ## Step 6 — sysctl hardening (optional)
 
