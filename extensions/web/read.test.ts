@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildJinaHeaders, buildJinaUrl, clampTokens, formatReadResult, validateReadUrl } from "./read.ts";
+import { buildExtractBody, clampChars, formatReadResult, validateReadUrl } from "./read.ts";
 
-test("clampTokens defaults, rejects non-finite, enforces floor, truncates", () => {
-	assert.equal(clampTokens(undefined), 10_000);
-	assert.equal(clampTokens(Number.NaN), 10_000);
-	assert.equal(clampTokens(Number.POSITIVE_INFINITY), 10_000);
-	assert.equal(clampTokens(100), 500);
-	assert.equal(clampTokens(1234.9), 1234);
+test("clampChars defaults, rejects non-finite, enforces floor, truncates", () => {
+	assert.equal(clampChars(undefined), 40_000);
+	assert.equal(clampChars(Number.NaN), 40_000);
+	assert.equal(clampChars(Number.POSITIVE_INFINITY), 40_000);
+	assert.equal(clampChars(100), 1_000);
+	assert.equal(clampChars(5_000.9), 5_000);
 });
 
 test("validateReadUrl accepts/normalizes http(s) and rejects blank/scheme-less/non-http", () => {
@@ -20,34 +20,34 @@ test("validateReadUrl accepts/normalizes http(s) and rejects blank/scheme-less/n
 	assert.throws(() => validateReadUrl("javascript:alert(1)"), /http\(s\)/);
 });
 
-test("buildJinaUrl appends the raw target to the reader base", () => {
-	assert.equal(buildJinaUrl("https://example.com/p"), "https://r.jina.ai/https://example.com/p");
+test("buildExtractBody requests markdown at basic depth for the url", () => {
+	assert.deepEqual(buildExtractBody("https://x.test"), {
+		urls: ["https://x.test"],
+		format: "markdown",
+		extract_depth: "basic",
+	});
 });
 
-test("buildJinaHeaders omits Authorization without a key, includes it with one", () => {
-	const noKey = buildJinaHeaders(10_000);
-	assert.equal(noKey["X-Return-Format"], "markdown");
-	assert.equal(noKey["X-Max-Tokens"], "10000");
-	assert.equal(noKey["Authorization"], undefined);
-	assert.equal(buildJinaHeaders(500, "secret")["Authorization"], "Bearer secret");
-});
-
-test("formatReadResult returns content + metadata and throws when empty", () => {
+test("formatReadResult returns content + metadata, throws with the failure reason", () => {
 	const r = formatReadResult(
-		{ data: { content: "body", title: "T", url: "https://x.test", usage: { tokens: 10 } } },
-		10_000,
+		{ results: [{ url: "https://x.test", title: "T", raw_content: "body" }], failed_results: [] },
+		40_000,
 		"https://fallback.test",
 	);
 	assert.equal(r.text, "# T\nhttps://x.test\n\nbody");
 	assert.equal(r.url, "https://x.test");
 	assert.equal(r.title, "T");
-	assert.equal(r.tokens, 10);
-	assert.throws(() => formatReadResult({ code: 422 }, 10_000, "https://fallback.test"), /no content/);
+	assert.equal(r.chars, 4);
+	assert.throws(
+		() => formatReadResult({ results: [], failed_results: [{ url: "u", error: "blocked" }] }, 40_000, "u"),
+		/could not extract content.*blocked/,
+	);
 });
 
-test("formatReadResult appends a trimmed note at budget and falls back to the request url", () => {
-	const r = formatReadResult({ data: { content: "body", usage: { tokens: 500 } } }, 500, "https://fallback.test");
-	assert.match(r.text, /\[trimmed to ~500 tokens/);
+test("formatReadResult truncates to max_chars with a note and falls back to the request url", () => {
+	const r = formatReadResult({ results: [{ raw_content: "abcdefghij" }] }, 4, "https://fallback.test");
+	assert.match(r.text, /^abcd\n\n\[truncated to 4 chars/);
 	assert.equal(r.url, "https://fallback.test");
 	assert.equal(r.title, undefined);
+	assert.equal(r.chars, 4);
 });

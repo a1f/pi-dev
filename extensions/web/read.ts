@@ -1,31 +1,30 @@
-// Pure helpers for web_read (Jina Reader). No network or env access — the
+// Pure helpers for web_read (Tavily /extract). No network or env access — the
 // unit-tested seam; index.ts wires them to the live request.
 
-import { DEFAULT_MAX_TOKENS, JINA_READER_ENDPOINT, MIN_MAX_TOKENS } from "./constants.ts";
+import { DEFAULT_MAX_CHARS, MIN_MAX_CHARS } from "./constants.ts";
 
-interface JinaReadData {
-	title?: string;
+interface TavilyExtractResult {
 	url?: string;
-	content?: string;
-	usage?: { tokens?: number };
+	title?: string;
+	raw_content?: string;
 }
 
 export interface ReadResult {
 	text: string;
 	url: string;
 	title: string | undefined;
-	tokens: number | undefined;
+	chars: number;
 }
 
-/** Default to 10000, reject non-finite, and enforce Jina's 500-token floor. */
-export function clampTokens(tokens: number | undefined): number {
-	if (typeof tokens !== "number" || !Number.isFinite(tokens)) return DEFAULT_MAX_TOKENS;
-	return Math.max(MIN_MAX_TOKENS, Math.trunc(tokens));
+/** Default to 40000, reject non-finite, and enforce a small floor. */
+export function clampChars(chars: number | undefined): number {
+	if (typeof chars !== "number" || !Number.isFinite(chars)) return DEFAULT_MAX_CHARS;
+	return Math.max(MIN_MAX_CHARS, Math.trunc(chars));
 }
 
 /**
  * Reject blank / scheme-less / non-http(s) input with a clear local error
- * rather than forwarding it raw to Jina as an opaque upstream failure.
+ * rather than forwarding it raw to the provider as an opaque upstream failure.
  */
 export function validateReadUrl(url: string): string {
 	const target = url.trim();
@@ -41,54 +40,44 @@ export function validateReadUrl(url: string): string {
 	return target;
 }
 
-/** Jina expects the target URL appended raw (not percent-encoded) to the base. */
-export function buildJinaUrl(url: string): string {
-	return JINA_READER_ENDPOINT + url.trim();
+/** Request body for POST /extract. `basic` depth is the cheapest (1 credit). */
+export function buildExtractBody(url: string): Record<string, unknown> {
+	return { urls: [url], format: "markdown", extract_depth: "basic" };
 }
 
 /**
- * Authorization is only sent when a key is present: keyless r.jina.ai works,
- * and an empty bearer would be rejected, so we omit the header instead.
+ * Narrow the extract response into the page content (with an optional title
+ * header) plus the metadata index.ts needs for `details`, truncating to
+ * maxChars (Tavily has no server-side cap). Throws when the page could not be
+ * extracted, surfacing the failed_results error when present.
  */
-export function buildJinaHeaders(maxTokens: number, jinaKey?: string): Record<string, string> {
-	const headers: Record<string, string> = {
-		Accept: "application/json",
-		"X-Return-Format": "markdown",
-		// Server-side token budget; Jina trims the body so we never truncate client-side.
-		"X-Max-Tokens": String(maxTokens),
+export function formatReadResult(json: unknown, maxChars: number, fallbackUrl: string): ReadResult {
+	const root = (json ?? {}) as {
+		results?: unknown;
+		failed_results?: unknown;
 	};
-	if (jinaKey) headers["Authorization"] = `Bearer ${jinaKey}`;
-	return headers;
-}
-
-/**
- * Narrow the raw JSON into the markdown body (with an optional title header)
- * plus the metadata index.ts needs for `details`, noting when Jina hit the
- * token budget. Throws when there is no content (surfacing any code/status).
- */
-export function formatReadResult(json: unknown, maxTokens: number, fallbackUrl: string): ReadResult {
-	const root = (json ?? {}) as { code?: number; status?: number; data?: JinaReadData };
-	const data = root.data ?? {};
-	const content = typeof data.content === "string" ? data.content : "";
+	const results = Array.isArray(root.results) ? root.results : [];
+	const first = results.find((r): r is TavilyExtractResult => typeof r === "object" && r !== null);
+	const content = typeof first?.raw_content === "string" ? first.raw_content : "";
 	if (!content) {
-		const detail = [root.code, root.status].filter((v) => v !== undefined).join("/");
-		throw new Error(`Jina Reader returned no content${detail ? ` (${detail})` : ""}`);
+		const failed = Array.isArray(root.failed_results) ? root.failed_results : [];
+		const firstFailed = failed.find((f): f is { error?: string } => typeof f === "object" && f !== null);
+		const reason = typeof firstFailed?.error === "string" ? `: ${firstFailed.error}` : "";
+		throw new Error(`Tavily could not extract content from the URL${reason}`);
 	}
 
-	const title = typeof data.title === "string" ? data.title : undefined;
-	const source = typeof data.url === "string" ? data.url : "";
+	const truncated = content.length > maxChars;
+	const body = truncated ? content.slice(0, maxChars) : content;
+	const note = truncated ? `\n\n[truncated to ${maxChars} chars — the page was larger]` : "";
+
+	const title = typeof first?.title === "string" ? first.title : undefined;
+	const source = typeof first?.url === "string" ? first.url : fallbackUrl;
 	const header = title ? `# ${title}\n${source}\n\n` : "";
 
-	const tokens = typeof data.usage?.tokens === "number" ? data.usage.tokens : undefined;
-	const trimmed =
-		tokens !== undefined && tokens >= maxTokens
-			? `\n\n[trimmed to ~${maxTokens} tokens — the page was larger]`
-			: "";
-
 	return {
-		text: `${header}${content}${trimmed}`,
-		url: typeof data.url === "string" ? data.url : fallbackUrl,
+		text: `${header}${body}${note}`,
+		url: source,
 		title,
-		tokens,
+		chars: body.length,
 	};
 }
