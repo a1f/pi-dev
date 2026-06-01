@@ -1,9 +1,10 @@
 // Block-message builders for the two modes. Pure string assembly; the wiring
 // in index.ts picks which one to use based on the rules' mode.
 
+import { LABEL } from "./constants.ts";
 import type { Violation } from "./evaluate.ts";
 
-const PREFIX = "🛡️ guardrails";
+const PREFIX = `[${LABEL}]`;
 
 function header(toolName: string, violation: Violation, invocation: string): string {
 	return `${PREFIX}: ${toolName} blocked — ${violation.reason}\n\nAttempted: ${invocation}`;

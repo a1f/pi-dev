@@ -8,13 +8,12 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import { LABEL, LOG_TYPE } from "./constants.ts";
 import { toNormalizedCall } from "./adapter.ts";
 import { evaluateNormalized, type NormalizedCall, type Violation } from "./evaluate.ts";
 import { abortReason, continueReason } from "./feedback.ts";
 import { type CompiledRules, EMPTY_RULES, loadRules, ruleCount } from "./rules.ts";
 
-const STATUS_KEY = "guardrails";
-const LOG_TYPE = "guardrails-log";
 const CONFIRM_TIMEOUT_MS = 30_000;
 
 export default function (pi: ExtensionAPI): void {
@@ -23,11 +22,11 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		const result = loadRules(ctx.cwd);
 		rules = result.rules;
-		for (const warning of result.warnings) ctx.ui.notify(`${STATUS_KEY}: ${warning}`, "warning");
+		for (const warning of result.warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
 		if (result.source === null) {
-			ctx.ui.notify(`${STATUS_KEY}: no rules file (.pi/guardrails.yaml) — nothing enforced.`, "warning");
+			ctx.ui.notify(`[${LABEL}] no rules file (.pi/guardrails.yaml) — nothing enforced.`, "warning");
 		}
-		ctx.ui.setStatus(STATUS_KEY, `🛡️ guardrails: ${ruleCount(rules)} rules (${rules.mode})`);
+		ctx.ui.setStatus(LABEL, `[${LABEL}] ${ruleCount(rules)} rules (${rules.mode})`);
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -47,15 +46,17 @@ export default function (pi: ExtensionAPI): void {
 		});
 		if (allowed) return { block: false };
 
-		ctx.ui.setStatus(STATUS_KEY, `⚠️ guardrails: blocked ${event.toolName} (${violation.category})`);
+		ctx.ui.setStatus(LABEL, `[${LABEL}] blocked ${event.toolName} (${violation.category})`);
 		if (rules.mode === "abort") {
 			// After ctx.abort() pi returns a generic "Operation aborted" to the model and
-			// drops our reason, so surface it to the user out-of-band before aborting.
+			// drops our reason, so surface it to the user (as an error) before aborting.
 			const reason = abortReason(event.toolName, violation, invocation);
 			ctx.ui.notify(reason, "error");
 			ctx.abort();
 			return { block: true, reason };
 		}
+		// continue mode: the model gets the full reason; the user gets a red one-liner.
+		ctx.ui.notify(`[${LABEL}] blocked ${event.toolName}: ${violation.reason}`, "error");
 		return { block: true, reason: continueReason(event.toolName, violation, invocation) };
 	});
 }
@@ -70,5 +71,5 @@ function invocationText(toolName: string, call: NormalizedCall): string {
 /** Ask the user to override an `ask` rule. With no UI (unattended) we can't prompt, so deny without stalling. */
 async function confirmOverride(ctx: ExtensionContext, violation: Violation, invocation: string): Promise<boolean> {
 	if (!ctx.hasUI) return false;
-	return ctx.ui.confirm("🛡️ guardrails", `${violation.reason}\n\n${invocation}\n\nProceed anyway?`, { timeout: CONFIRM_TIMEOUT_MS });
+	return ctx.ui.confirm(`[${LABEL}]`, `${violation.reason}\n\n${invocation}\n\nProceed anyway?`, { timeout: CONFIRM_TIMEOUT_MS });
 }

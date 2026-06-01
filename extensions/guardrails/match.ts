@@ -7,6 +7,8 @@
 import { basename, isAbsolute, normalize, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 
+import { DELETE_VERBS, MUTATING_VERBS } from "./constants.ts";
+
 /** Expand a leading `~` and any `$HOME` / `${HOME}` to the home directory. */
 export function expandHome(input: string, home: string = homedir()): string {
 	const tildeExpanded = input === "~" || input.startsWith("~/") ? home + input.slice(1) : input;
@@ -91,15 +93,15 @@ function buildVerbRegExp(verbs: readonly string[]): RegExp {
 	return new RegExp(`(?:^|[\\s;|&(])(?:${verbs.map(escapeRegExp).join("|")})(?=\\s|$)`);
 }
 
-const MUTATING_VERBS = buildVerbRegExp(["rm", "mv", "cp", "dd", "tee", "truncate", "sed", "chmod", "chown"]);
-const DELETE_VERBS = buildVerbRegExp(["rm", "mv", "rmdir", "shred", "unlink"]);
+const MUTATING_VERB_RE = buildVerbRegExp(MUTATING_VERBS);
+const DELETE_VERB_RE = buildVerbRegExp(DELETE_VERBS);
 
 /** Does the command appear to modify a file in place or via redirect? */
 export function commandMutates(command: string): boolean {
-	return MUTATING_VERBS.test(command) || command.includes(">");
+	return MUTATING_VERB_RE.test(command) || command.includes(">");
 }
 
 /** Does the command appear to delete or move a file? */
 export function commandDeletes(command: string): boolean {
-	return DELETE_VERBS.test(command);
+	return DELETE_VERB_RE.test(command);
 }
