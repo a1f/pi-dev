@@ -1,7 +1,7 @@
 {
   "defaultProvider": "anthropic",
   "quietStartup": false,
-  "extensions": ["extensions/web.ts"],
+  "extensions": ["extensions/guardrails", "extensions/web"],
   "skills": [],
   "packages": []
 }

@@ -25,6 +25,8 @@ checklist.
   a sibling session.
 - **Strict `.env` parser** (parse, don't source) so a malicious `.env` can't
   RCE the operator's shell on the next `spawn.sh`.
+- **`guardrails` extension** — an in-VM safety net over pi's own tool calls
+  (see below).
 
 ## Prerequisites
 
@@ -74,10 +76,12 @@ scripts/
   spawn.sh            create worktree + launch pi
   reap.sh             list / remove worktrees (--merged, --all)
 .pi/
-  settings.json       project-level pi config (provider, defaults)
+  settings.json       project-level pi config (provider, extensions list)
   skills/             project skills (loaded on /skill:name)
   agents/             agent personas
+  guardrails.yaml     rules for the guardrails extension
 extensions/           project TypeScript extensions
+  guardrails/         in-VM tool-call safety net
 AGENTS.md             project instructions pi reads at startup
 docs/
   vm-setup.md         VM hardening checklist
@@ -88,9 +92,36 @@ docs/
 
 This is just the dev-loop scaffold. Coming as needs arise:
 
-- Actual skills, agents, extensions
+- More skills, agents, and extensions — the first, [`guardrails`](#the-guardrails-extension), has landed
 - PR-flavored skills (babysit, comments, make-pr) + GitHub PAT wiring
 - Pi `permissions.json` once you've watched pi run enough to know what to deny
+
+## The `guardrails` extension
+
+`extensions/guardrails/` (registered in `.pi/settings.json`) is a safety net
+that intercepts pi's own tool calls and blocks the dangerous or protected
+ones — reading secrets, overwriting generated files, and irreversible/outward
+commands (force-push, remote/cloud deletes, `npm publish`). Every decision is
+written to a `guardrails-log` session entry. Threat model: our own honest
+mistakes, not prompt injection — the VM is the real boundary, so matching is
+heuristic by design.
+
+Rules live in `.pi/guardrails.yaml` (project) or `~/.pi/guardrails.yaml`
+(global), with four buckets — `zeroAccessPaths`, `readOnlyPaths`,
+`noDeletePaths`, `bashToolPatterns` — and a `mode` (`continue` = block and let
+the agent adapt; `abort` = hard-stop the turn and notify you).
+
+Develop it like any TypeScript:
+
+```sh
+npm install        # once
+npm run typecheck  # tsc --noEmit (strict)
+npm test           # node --test (pure core: match / rules / evaluate / feedback)
+```
+
+The pure policy core (`match.ts`, `rules.ts`, `evaluate.ts`) has no pi
+dependency, so it's unit-tested without launching the agent; `adapter.ts` is
+the only pi-coupled seam and `index.ts` wires it in.
 
 ## History
 
