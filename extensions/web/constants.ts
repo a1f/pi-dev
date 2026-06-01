@@ -1,15 +1,15 @@
-// Shared constants for the web tools: web_search (Brave) and web_read (Jina).
+// Shared constants for the web tools: web_search and web_read, both on Jina.
 
-/** Brave Web Search API endpoint. */
-export const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+/** Jina Search base; the query is passed as the `q` parameter. */
+export const JINA_SEARCH_ENDPOINT = "https://s.jina.ai/";
 /** Jina Reader base; the target URL is appended raw (not percent-encoded). */
 export const JINA_READER_ENDPOINT = "https://r.jina.ai/";
 
-/** Per-request timeouts. Jina renders JS pages, so reads are markedly slower. */
-export const SEARCH_TIMEOUT_MS = 10_000;
+/** Per-request timeouts. Reads render JS pages; searches query an engine. */
+export const SEARCH_TIMEOUT_MS = 15_000;
 export const READ_TIMEOUT_MS = 30_000;
 
-/** Brave result-count bounds. */
+/** Result-count bounds (applied client-side by slicing the result list). */
 export const DEFAULT_COUNT = 5;
 export const MIN_COUNT = 1;
 export const MAX_COUNT = 20;
