@@ -1,0 +1,19 @@
+{
+  "name": "pi-dev-extensions",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "pi customizations for pi-dev: extensions, tools, skills.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'extensions/**/*.test.ts'"
+  },
+  "dependencies": {
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.77.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
