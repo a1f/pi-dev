@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildJinaSearchUrl, buildSearchHeaders, clampCount, formatSearchResults, mapJinaResults } from "./search.ts";
+import { buildSearchBody, clampCount, formatSearchResults, mapTavilyResults } from "./search.ts";
 
 test("clampCount defaults, rejects non-finite, clamps and truncates", () => {
 	assert.equal(clampCount(undefined), 5);
@@ -12,35 +12,26 @@ test("clampCount defaults, rejects non-finite, clamps and truncates", () => {
 	assert.equal(clampCount(7.9), 7);
 });
 
-test("buildJinaSearchUrl encodes the query as the q parameter", () => {
-	const url = new URL(buildJinaSearchUrl("hello world & co"));
-	assert.equal(url.origin + url.pathname, "https://s.jina.ai/");
-	assert.equal(url.searchParams.get("q"), "hello world & co");
+test("buildSearchBody sets query, max_results, and cheap defaults", () => {
+	assert.deepEqual(buildSearchBody("nodejs lts", 3), {
+		query: "nodejs lts",
+		max_results: 3,
+		search_depth: "basic",
+		include_raw_content: false,
+	});
 });
 
-test("buildSearchHeaders requests results-only JSON, omits Authorization without a key", () => {
-	const noKey = buildSearchHeaders();
-	assert.equal(noKey["Accept"], "application/json");
-	assert.equal(noKey["X-Respond-With"], "no-content");
-	assert.equal(noKey["Authorization"], undefined);
-	assert.equal(buildSearchHeaders("secret")["Authorization"], "Bearer secret");
-});
-
-test("mapJinaResults tolerates missing/non-array data and maps the fields", () => {
-	assert.deepEqual(mapJinaResults(null), []);
-	assert.deepEqual(mapJinaResults({}), []);
-	assert.deepEqual(mapJinaResults({ data: "nope" }), []);
-	const mapped = mapJinaResults({
-		data: [
-			{ title: "T", url: "https://x.test", description: "d" },
-			{ title: "C", url: "https://y.test", content: "from-content" },
+test("mapTavilyResults tolerates missing/non-array results and maps content->description", () => {
+	assert.deepEqual(mapTavilyResults(null), []);
+	assert.deepEqual(mapTavilyResults({}), []);
+	assert.deepEqual(mapTavilyResults({ results: "nope" }), []);
+	const mapped = mapTavilyResults({
+		results: [
+			{ title: "T", url: "https://x.test", content: "snippet", score: 0.9, raw_content: null },
 			42,
 		],
 	});
-	assert.deepEqual(mapped, [
-		{ title: "T", url: "https://x.test", description: "d" },
-		{ title: "C", url: "https://y.test", description: "from-content" },
-	]);
+	assert.deepEqual(mapped, [{ title: "T", url: "https://x.test", description: "snippet" }]);
 });
 
 test("formatSearchResults numbers entries and handles empty", () => {
