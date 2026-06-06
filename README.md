@@ -14,7 +14,7 @@ bubblewrap/nsjail/firejail inside the VM — not in scope here.
 
 Egress allowlisting, sysctl hardening, and non-root-user setup live on the
 VM, not in this repo. See [`docs/vm-setup.md`](docs/vm-setup.md) for the
-checklist.
+checklist .
 
 ## What you get
 
