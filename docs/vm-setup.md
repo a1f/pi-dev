@@ -125,20 +125,14 @@ OAuth:           auth.openai.com, chatgpt.com, console.anthropic.com, claude.ai
 Packages:        registry.npmjs.org, pi.dev
 Git/GitHub:      github.com, api.github.com, codeload.github.com,
                  objects.githubusercontent.com, raw.githubusercontent.com
-Web tools:       api.tavily.com
 ```
-
-`Web tools` covers the `web_search` and `web_read` extension (both on Tavily,
-`api.tavily.com`). Omit the line if you don't use those tools; with it omitted
-and the firewall on, the tools fail closed (connection timeout) rather than
-leaking.
 
 `sudo systemctl enable --now nftables`.
 
 #### Keeping the set fresh — CDN IP rotation
 
 `allowed_domains_v4` is static: it holds the IPs you resolved when you populated
-it. CDN-fronted hosts (Tavily's `api.tavily.com`, and several of the LLM APIs)
+it. CDN-fronted hosts (several of the LLM APIs)
 rotate their IPs, so on a long-running VM the set goes
 stale and requests start timing out even though the domain is "allowed".
 Refresh it on a timer.
@@ -156,7 +150,6 @@ DOMAINS=(
     registry.npmjs.org pi.dev
     github.com api.github.com codeload.github.com
     objects.githubusercontent.com raw.githubusercontent.com
-    api.tavily.com
 )
 for d in "${DOMAINS[@]}"; do
     getent ahostsv4 "$d" | awk '{print $1}' | sort -u | while read -r ip; do
