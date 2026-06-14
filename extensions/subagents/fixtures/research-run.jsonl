@@ -1,0 +1,13 @@
+{"type":"session","version":3,"id":"s_runstate_01","timestamp":"2026-06-14T00:00:00.000Z","cwd":"/home/agent/pi-dev"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[],"stopReason":null}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Let me inspect the project."},{"type":"tool_use","id":"t1","name":"read","input":{"path":"package.json"}}],"stopReason":"toolUse","usage":{"input":4000,"output":300,"cacheRead":1000,"cacheWrite":50,"totalTokens":9000}}}
+{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"package.json"}}
+{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":"{ \"name\": \"pi-dev-extensions\" }","isError":false}
+{"type":"message_start","message":{"role":"assistant","content":[],"stopReason":null}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Now let me search the tests."},{"type":"tool_use","id":"t2","name":"grep","input":{"pattern":"reduceRunState"}}],"stopReason":"toolUse","usage":{"input":5200,"output":340,"cacheRead":1400,"cacheWrite":60,"totalTokens":10800}}}
+{"type":"tool_execution_start","toolCallId":"t2","toolName":"grep","args":{"pattern":"reduceRunState"}}
+{"type":"tool_execution_end","toolCallId":"t2","toolName":"grep","result":"no matches","isError":false}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Summary:\n"},{"type":"text","text":"All checks passed.\nDone."}],"stopReason":"endTurn","usage":{"input":8000,"output":1200,"cacheRead":3000,"cacheWrite":145,"totalTokens":12345}},"toolResults":[]}
+{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Summary:\n"},{"type":"text","text":"All checks passed.\nDone."}],"stopReason":"endTurn"}],"willRetry":false}
