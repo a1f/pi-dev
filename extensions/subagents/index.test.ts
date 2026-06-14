@@ -88,6 +88,19 @@ function makeFakePi(): FakePi {
 
 const tempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), "subagents-"));
 
+/** The argument following the first occurrence of `flag` in a spawn argv, or undefined. */
+const flagValue = (args: string[], flag: string): string | undefined => {
+	const i = args.indexOf(flag);
+	return i === -1 ? undefined : args[i + 1];
+};
+
+/** Write a persona markdown file into <cwd>/.pi/agents so loadPersonas can find it. */
+const writePersona = async (cwd: string, file: string, content: string): Promise<void> => {
+	const agents = join(cwd, ".pi", "agents");
+	await mkdir(agents, { recursive: true });
+	await writeFile(join(agents, file), content, "utf8");
+};
+
 const fakeCtx = { cwd: "/tmp", ui: { notify() {} }, hasUI: false };
 const commandCtx = fakeCtx as unknown as CommandCtx;
 const toolCtx = fakeCtx as unknown as ToolCtx;
@@ -106,6 +119,79 @@ test("command handler injects the subagent answer back as a follow-up", async ()
 	assert.ok(sent, "a follow-up message must be delivered");
 	assert.ok(typeof sent.content === "string" && sent.content.includes(ANSWER), "the delivered message must carry the subagent's answer");
 	assert.equal(sent.options?.deliverAs, "followUp");
+});
+
+test("a named persona applies its tools and system prompt, and the child still loads guardrails", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	await writePersona(
+		dir,
+		"scout.md",
+		"---\nname: scout\ndescription: Maps the repository.\ntools:\n  - read\n  - grep\n  - find\n---\nYou are scout. Map the repository.",
+	);
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.commandHandler("scout summarize the layout", ctx);
+
+	assert.equal(fake.execCalls.length, 1, "a persona dispatch must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	assert.equal(flagValue(args, "--tools"), "read,grep,find", "the child must run with the persona's tools");
+	assert.equal(flagValue(args, "--system-prompt"), "You are scout. Map the repository.", "the persona body becomes the child's system prompt");
+	const extension = flagValue(args, "--extension");
+	assert.ok(extension !== undefined && extension.endsWith("guardrails"), "every child must load the guardrails extension");
+});
+
+test("a plain dispatch (no persona) still loads guardrails and runs with the default read-only tools", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd(); // no personas: the whole arg string is the task
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.commandHandler("summarize the README", ctx);
+
+	assert.equal(fake.execCalls.length, 1, "a plain dispatch must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	const extension = flagValue(args, "--extension");
+	assert.ok(extension !== undefined && extension.endsWith("guardrails"), "even a persona-less child must load guardrails");
+	assert.equal(flagValue(args, "--tools"), "read,grep,find,ls", "a plain dispatch keeps the default read-only tools");
+});
+
+test("a persona with no body dispatches without a --system-prompt flag (the child's default applies)", async () => {
+	// parsePersona allows a frontmatter-only persona, whose trimmed body is "". Forwarding
+	// that empty string would emit `--system-prompt ""`, replacing the child's default prompt
+	// with nothing; an empty body must instead fall back to the default like tools/model do.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "bare.md", "---\nname: bare\ndescription: Frontmatter only, no body.\n---\n");
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.commandHandler("bare do the thing", ctx);
+
+	assert.equal(fake.execCalls.length, 1, "a persona dispatch must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	assert.equal(flagValue(args, "--system-prompt"), undefined, "an empty persona body must not replace the child's default system prompt");
+});
+
+test("the agent_dispatch tool spawns a child that loads the guardrails extension", async () => {
+	// The tool routes through the shared dispatch, so its child must carry guardrails too.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
+
+	await fake.tool.execute("id", { task: "summarize the README" }, undefined, undefined, toolCtx);
+
+	assert.equal(fake.execCalls.length, 1, "the tool must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	const extension = flagValue(args, "--extension");
+	assert.ok(extension !== undefined && extension.endsWith("guardrails"), "the tool path must load guardrails too");
 });
 
 test("command handler handles an invalid task without throwing or spawning", async () => {
@@ -181,6 +267,26 @@ interface Note {
 
 const notifyingCtx = (cwd: string, notes: Note[]): CommandCtx =>
 	({ cwd, ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) }, hasUI: false }) as unknown as CommandCtx;
+
+test("the /agent handler surfaces a warning for a malformed persona file and still dispatches", async () => {
+	// loadPersonas skips a malformed file but reports it in `warnings`; the handler must
+	// surface that to the operator (not silently drop it) and still run the requested task.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "broken.md", "no frontmatter fence at all");
+	const notes: Note[] = [];
+
+	await fake.commandHandler("summarize the README", notifyingCtx(dir, notes));
+
+	const warning = notes.find((note) => note.level === "warning");
+	assert.ok(warning, "a malformed persona file must surface a warning notification");
+	assert.match(warning.msg, /broken\.md/);
+	assert.equal(fake.execCalls.length, 1, "a malformed persona must not stop the dispatch");
+	assert.equal(fake.sent.length, 1, "the answer must still be delivered");
+});
 
 test("/agent-log notifies the rendered tail of the most recent run log", async () => {
 	const fake = makeFakePi();

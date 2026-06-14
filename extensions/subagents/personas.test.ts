@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { PERSONA_ERRORS } from "./constants.ts";
-import { loadPersonas, parsePersona } from "./personas.ts";
+import { loadPersonas, parsePersona, resolveDispatch } from "./personas.ts";
 
 // loadPersonas scans <cwd>/.pi/agents; the fixtures provide a small workspace whose
 // .pi/agents directory holds two valid personas and one malformed file.
@@ -76,6 +76,27 @@ test("parsePersona reports invalid input as an error naming the cause, without t
 
 	// Our explicit choice: a non-string `model` is an error, not silently ignored.
 	assert.equal(expectError(parsePersona("---\nname: x\ndescription: y\nmodel:\n  - a\n---\nbody")), PERSONA_ERRORS.badModel);
+});
+
+test("resolveDispatch matches the first token to a persona name and returns the remainder as the task", () => {
+	const scout = expectOk(parsePersona("---\nname: scout\ndescription: Maps the repo.\n---\nYou are scout."));
+	const reviewer = expectOk(parsePersona("---\nname: reviewer\ndescription: Reviews diffs.\n---\nYou are a reviewer."));
+
+	const resolved = resolveDispatch("scout  map the repo ", [reviewer, scout]);
+	assert.equal(resolved.persona, scout);
+	assert.equal(resolved.task, "map the repo");
+});
+
+test("resolveDispatch returns an empty task for a bare persona name", () => {
+	const scout = expectOk(parsePersona("---\nname: scout\ndescription: Maps the repo.\n---\nYou are scout."));
+
+	// A bare persona name with no remainder leaves the task empty (caller treats that as a usage error).
+	assert.deepEqual(resolveDispatch("scout", [scout]), { persona: scout, task: "" });
+});
+
+test("resolveDispatch treats an unrecognized first token as part of the task, not a persona", () => {
+	const scout = expectOk(parsePersona("---\nname: scout\ndescription: Maps the repo.\n---\nYou are scout."));
+	assert.deepEqual(resolveDispatch("summarize the readme", [scout]), { persona: null, task: "summarize the readme" });
 });
 
 test("loadPersonas returns valid personas in filename order and warns about a malformed file", () => {
