@@ -7,6 +7,7 @@
 import { join } from "node:path";
 
 import { buildSpawnArgv } from "./argv.ts";
+import type { SpawnArgvOptions } from "./argv.ts";
 import { RUNS_DIR } from "./constants.ts";
 import { parseEventStream } from "./events.ts";
 import { formatRunLog, isSafeRunId, runLogName } from "./log.ts";
@@ -71,34 +72,45 @@ function defaultRunId(): string {
 	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${runSeq}`;
 }
 
+/**
+ * runAgent's knobs: dispatch controls (timeout, cwd, log writer, run id) plus the spawn
+ * options forwarded verbatim into buildSpawnArgv (tools/model/system prompt/extensions), so
+ * the adapter can apply a persona and the guardrails extension to the child. The spawn subset
+ * is picked straight from SpawnArgvOptions so those fields stay defined in exactly one place.
+ */
+export interface RunAgentOptions extends Pick<SpawnArgvOptions, "tools" | "model" | "systemPrompt" | "extensions"> {
+	timeoutMs?: number;
+	cwd?: string;
+	writeLog?: LogWriter;
+	runId?: string;
+}
+
 /** Dispatch a one-shot pi child for `task` and report its parsed outcome. */
-export async function runAgent(
-	task: string,
-	exec: ExecLike,
-	options?: { timeoutMs?: number; cwd?: string; writeLog?: LogWriter; runId?: string },
-): Promise<DispatchResult> {
+export async function runAgent(task: string, exec: ExecLike, options?: RunAgentOptions): Promise<DispatchResult> {
 	// Stay total over the pi adapter: a task we cannot launch must resolve with a
 	// reason, never spawn a child or throw. Empty and argv-rejected tasks short-circuit
 	// before any run id or log exists, so they report null run/log and zero duration.
 	if (task.trim() === "") {
 		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, error: "task is required" };
 	}
+	// Split dispatch controls from the spawn knobs; `spawn` is exactly SpawnArgvOptions minus
+	// `task`, so it forwards into buildSpawnArgv as-is without re-listing each field.
+	const { timeoutMs, cwd, writeLog = noopWriteLog, runId: requestedRunId, ...spawn } = options ?? {};
 	let argv: string[];
 	try {
-		argv = buildSpawnArgv({ task });
+		argv = buildSpawnArgv({ task, ...spawn });
 	} catch (error) {
 		const reason: string = error instanceof Error ? error.message : String(error);
 		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, error: reason };
 	}
-	const runId = options?.runId ?? defaultRunId();
-	const logPath = join(options?.cwd ?? ".", RUNS_DIR, runLogName(runId));
+	const runId = requestedRunId ?? defaultRunId();
+	const logPath = join(cwd ?? ".", RUNS_DIR, runLogName(runId));
 	const startedAt = Date.now();
-	const result = await exec("pi", argv, { timeout: options?.timeoutMs, cwd: options?.cwd });
+	const result = await exec("pi", argv, { timeout: timeoutMs, cwd });
 	const durationMs = Date.now() - startedAt;
 	const parsed = parseEventStream(result.stdout);
 	// Best-effort logging: a write failure must never derail the dispatch result, and an
 	// unsafe (path-traversing) runId is skipped rather than allowed to escape RUNS_DIR.
-	const writeLog = options?.writeLog ?? noopWriteLog;
 	if (isSafeRunId(runId)) {
 		try {
 			const content = formatRunLog({
