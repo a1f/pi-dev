@@ -13,10 +13,11 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, LABEL, LOG_COMMAND, RUNS_DIR, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
 import { loadPersonas, type Persona, resolveDispatch } from "./personas.ts";
-import { formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
+import { RunRegistry, renderRows } from "./registry.ts";
+import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
 
 // The guardrails extension is a sibling dir (extensions/guardrails), resolved from this file's
 // location so it is correct regardless of the parent session's cwd. Every spawned child loads it
@@ -33,16 +34,30 @@ export default function (pi: ExtensionAPI): void {
 		await writeFile(logPath, content, "utf8");
 	};
 
-	// Run a child, then best-effort record the run as a parent-session audit entry.
-	// Shared by the /agent command and the agent_dispatch tool so logging + audit
-	// live in one place. A persistence failure must never break the dispatch. A persona
-	// (when matched) supplies the child's tools/model/system prompt — null fields fall back
-	// to buildSpawnArgv's defaults — and every child loads guardrails regardless.
+	// Live record of this session's dispatched runs, surfaced by the agent_status tool.
+	const registry = new RunRegistry();
+
+	// Track a run, dispatch the child (with its persona + guardrails), mark it finished, then
+	// best-effort record it as a parent-session audit entry. Shared by the /agent command and the
+	// agent_dispatch tool so tracking + logging + audit live in one place. The run is registered
+	// synchronously before the first await — so an in-flight dispatch is observable as "running" —
+	// and the same runId is threaded into runAgent so its log lines up. A persona (when matched)
+	// supplies the child's tools/model/system prompt — null fields fall back to buildSpawnArgv's
+	// defaults — and every child loads guardrails regardless. A persistence failure must never
+	// break the dispatch.
 	const dispatch = async (task: string, cwd: string, persona: Persona | null): Promise<DispatchResult> => {
+		const runId = defaultRunId();
+		const startedAt = Date.now();
+		// Wire kill to abort: registering onKill before the await keeps the in-flight run
+		// observable as running, and aborting the controller cancels the child's exec.
+		const controller = new AbortController();
+		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
 		const result = await runAgent(task, exec, {
 			timeoutMs: DEFAULT_TIMEOUT_MS,
 			cwd,
 			writeLog,
+			runId,
+			signal: controller.signal,
 			extensions: [GUARDRAILS_EXTENSION],
 			tools: persona?.tools ?? undefined,
 			model: persona?.model ?? undefined,
@@ -51,6 +66,7 @@ export default function (pi: ExtensionAPI): void {
 			// emitting `--system-prompt ""` and replacing that default with nothing.
 			systemPrompt: persona?.systemPrompt || undefined,
 		});
+		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
@@ -100,6 +116,35 @@ export default function (pi: ExtensionAPI): void {
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 			const result = await dispatch(params.task, ctx.cwd, null);
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: STATUS_TOOL,
+		label: "Subagent status",
+		description: "List this session's dispatched subagents with their live status.",
+		parameters: Type.Object({}),
+		execute: async (_toolCallId, _params, _signal, _onUpdate, _ctx) => {
+			const runs = registry.list();
+			const text = runs.length === 0 ? "No subagent runs yet." : renderRows(runs, Date.now());
+			return {
+				content: [{ type: "text", text }],
+				details: { runs: runs.map((run) => ({ runId: run.runId, task: run.task, status: run.status })) },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: KILL_TOOL,
+		label: "Kill subagent",
+		description: "Abort a still-running dispatched subagent by run id.",
+		parameters: Type.Object({
+			runId: Type.String({ description: "The run id of the subagent to kill, as reported by agent_status." }),
+		}),
+		execute: async (_toolCallId, { runId }, _signal, _onUpdate, _ctx) => {
+			const killed = registry.kill(runId);
+			const text = killed ? `Killed subagent run ${runId}.` : `No running subagent with run id ${runId}.`;
+			return { content: [{ type: "text", text }], details: { killed } };
 		},
 	});
 

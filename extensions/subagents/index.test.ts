@@ -8,9 +8,10 @@ import { fileURLToPath } from "node:url";
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, LOG_COMMAND, RUNS_DIR } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, LOG_COMMAND, RUNS_DIR, TOOL } from "./constants.ts";
 import subagents from "./index.ts";
 import { type SubagentRunAudit } from "./log.ts";
+import { type ExecLike, type ExecResultLike } from "./runner.ts";
 
 // Drive the real extension default export against a fake pi so the inject-link
 // is exercised end to end: the command handler must run runAgent over pi.exec,
@@ -25,9 +26,13 @@ type ToolDef = Parameters<ExtensionAPI["registerTool"]>[0];
 type CommandCtx = Parameters<CommandHandler>[1];
 type ToolCtx = Parameters<ToolDef["execute"]>[4];
 
+/** The options pi.exec received, including the AbortSignal a kill aborts the child with. */
+type ExecOptions = NonNullable<Parameters<ExecLike>[2]>;
+
 interface ExecCall {
 	command: string;
 	args: string[];
+	options: ExecOptions | undefined;
 }
 interface SentMessage {
 	content: string | unknown[];
@@ -43,6 +48,7 @@ interface FakePi {
 	commandHandler: CommandHandler | undefined;
 	logHandler: CommandHandler | undefined;
 	tool: ToolDef | undefined;
+	tools: ToolDef[];
 	execCalls: ExecCall[];
 	sent: SentMessage[];
 	audits: AuditCall[];
@@ -51,11 +57,12 @@ interface FakePi {
 	pi: ExtensionAPI;
 }
 
-function makeFakePi(): FakePi {
+function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 	const fake: FakePi = {
 		commandHandler: undefined,
 		logHandler: undefined,
 		tool: undefined,
+		tools: [],
 		execCalls: [],
 		sent: [],
 		audits: [],
@@ -68,11 +75,16 @@ function makeFakePi(): FakePi {
 			else if (name === LOG_COMMAND) fake.logHandler = options.handler;
 		},
 		registerTool(tool: ToolDef): void {
-			fake.tool = tool;
+			fake.tools.push(tool);
+			// Keep `tool` pinned to the dispatch tool by name so adding sibling tools
+			// (e.g. agent_status) never shifts what the agent_dispatch tests reach.
+			if (tool.name === TOOL) fake.tool = tool;
 		},
-		exec(command: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> {
-			fake.execCalls.push({ command, args });
-			return Promise.resolve({ stdout: happyStream, stderr: "", code: 0, killed: false });
+		exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResultLike> {
+			fake.execCalls.push({ command, args, options });
+			// A test may inject its own exec (e.g. a deferred) to observe a run mid-flight;
+			// the default resolves immediately with the shared happy-path fixture.
+			return respondExec !== undefined ? respondExec() : Promise.resolve({ stdout: happyStream, stderr: "", code: 0, killed: false });
 		},
 		sendUserMessage(content: string | unknown[], options?: { deliverAs?: string }): void {
 			fake.sent.push({ content, options });
@@ -341,4 +353,114 @@ test("/agent-log warns once when the most recent run log cannot be read", async 
 	assert.ok(note);
 	assert.match(note.msg, /could not read run log/);
 	assert.equal(note.level, "warning");
+});
+
+type ToolResult = Awaited<ReturnType<ToolDef["execute"]>>;
+
+/** One run as the agent_status tool exposes it under its structured details. */
+interface StatusRun {
+	runId: string;
+	task: string;
+	status: string;
+}
+
+/** True when a tool's details carry the run list agent_status must report. */
+function hasRuns(details: unknown): details is { runs: readonly StatusRun[] } {
+	return details !== null && typeof details === "object" && "runs" in details && Array.isArray(details.runs);
+}
+
+/** The runs agent_status reports, narrowed from the tool result's structured details. */
+function statusRuns(result: ToolResult): readonly StatusRun[] {
+	if (!hasRuns(result.details)) assert.fail("agent_status must report runs under details.runs");
+	return result.details.runs;
+}
+
+/** The human-readable rows text agent_status returns as its first content block. */
+function statusRows(result: ToolResult): string {
+	const block = result.content[0];
+	return block && block.type === "text" ? block.text : "";
+}
+
+test("agent_status reports an in-flight run as running and a completed run as done", async () => {
+	// Hold the child's exec open so the dispatch is observably mid-flight while we
+	// check status; resolving the deferred later lets the run finish.
+	let settleExec!: (result: ExecResultLike) => void;
+	const pendingExec = new Promise<ExecResultLike>((resolve) => {
+		settleExec = resolve;
+	});
+	const fake = makeFakePi(() => pendingExec);
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const statusTool = fake.tools.find((tool) => tool.name === "agent_status");
+	assert.ok(statusTool, "the extension must register the agent_status tool");
+
+	// Start a dispatch but leave exec pending, so the run is still running.
+	const dispatched = fake.commandHandler("scout repo", commandCtx);
+
+	const live = await statusTool.execute("id", {}, undefined, undefined, toolCtx);
+	const liveRuns = statusRuns(live);
+	assert.equal(liveRuns.length, 1, "the in-flight dispatch must be tracked as exactly one run");
+	const liveRun = liveRuns[0];
+	assert.ok(liveRun);
+	assert.equal(liveRun.task, "scout repo", "the tracked run must carry the dispatched task");
+	assert.equal(liveRun.status, "running", "a run whose child is still in flight must report as running");
+	assert.ok(statusRows(live).includes("▶"), "the rows for a running run must carry the running glyph");
+
+	// Let the child finish, then let the dispatch settle.
+	settleExec({ stdout: happyStream, stderr: "", code: 0, killed: false });
+	await dispatched;
+
+	const settled = await statusTool.execute("id", {}, undefined, undefined, toolCtx);
+	const settledRun = statusRuns(settled)[0];
+	assert.ok(settledRun);
+	assert.equal(settledRun.status, "done", "a run whose child completed cleanly must report as done");
+	assert.ok(statusRows(settled).includes("✓"), "the rows for a done run must carry the done glyph");
+});
+
+test("agent_kill aborts the in-flight child and the run stays killed after a late completion", async () => {
+	// Hold the child's exec open so the run is observably mid-flight; resolving the
+	// deferred later replays the aborted child returning after the kill.
+	let settleExec!: (result: ExecResultLike) => void;
+	const pendingExec = new Promise<ExecResultLike>((resolve) => {
+		settleExec = resolve;
+	});
+	const fake = makeFakePi(() => pendingExec);
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const statusTool = fake.tools.find((tool) => tool.name === "agent_status");
+	assert.ok(statusTool, "the extension must register the agent_status tool");
+	const killTool = fake.tools.find((tool) => tool.name === "agent_kill");
+	assert.ok(killTool, "the extension must register the agent_kill tool");
+
+	// Start a dispatch but leave exec pending, so the child is still in flight.
+	const dispatched = fake.commandHandler("scout repo", commandCtx);
+
+	// The child's exec must receive a live, not-yet-aborted AbortSignal.
+	const signal = fake.execCalls[0]?.options?.signal;
+	assert.ok(signal, "the in-flight child's exec must receive an AbortSignal");
+	assert.equal(signal.aborted, false, "the signal must stay live while the child runs");
+
+	const before = await statusTool.execute("id", {}, undefined, undefined, toolCtx);
+	const runId = statusRuns(before)[0]?.runId;
+	assert.ok(runId, "the in-flight dispatch must be tracked with a run id");
+
+	await killTool.execute("id", { runId }, undefined, undefined, toolCtx);
+	assert.equal(signal.aborted, true, "killing the run must abort its in-flight exec");
+
+	const afterKill = await statusTool.execute("id", {}, undefined, undefined, toolCtx);
+	const killedRun = statusRuns(afterKill)[0];
+	assert.ok(killedRun);
+	assert.equal(killedRun.status, "killed", "a killed run must report as killed");
+	assert.ok(statusRows(afterKill).includes("⊘"), "the rows for a killed run must carry the killed glyph");
+
+	// The aborted child still returns late; the run must stay killed, not flip to error.
+	settleExec({ stdout: "", stderr: "", code: 1, killed: true });
+	await dispatched;
+
+	const afterReturn = await statusTool.execute("id", {}, undefined, undefined, toolCtx);
+	const finalRun = statusRuns(afterReturn)[0];
+	assert.ok(finalRun);
+	assert.equal(finalRun.status, "killed", "a late completion must not overwrite a killed run");
 });
