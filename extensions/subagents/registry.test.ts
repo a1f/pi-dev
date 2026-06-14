@@ -34,3 +34,39 @@ test("register creates a running record retrievable by id and present in the lis
 	assert.equal(all.length, 1);
 	assert.deepEqual(all[0], expected);
 });
+
+test("finish records the terminal status, final state, and finish time for both done and error", () => {
+	const reg = new RunRegistry();
+
+	const doneState: RunState = {
+		toolCount: 3,
+		lastLine: "Done.",
+		contextTokens: 1200,
+		contextPct: 0.6,
+		done: true,
+		malformed: 0,
+	};
+	reg.register("r1", "summarize the readme", 1000);
+	reg.finish("r1", "done", doneState, 4500);
+
+	const r1 = reg.get("r1");
+	assert.equal(r1?.status, "done");
+	assert.equal(r1?.finishedAt, 4500);
+	assert.deepEqual(r1?.state, doneState);
+
+	const errorState: RunState = {
+		toolCount: 1,
+		lastLine: "boom",
+		contextTokens: 500,
+		contextPct: null,
+		done: false,
+		malformed: 2,
+	};
+	reg.register("r2", "build the thing", 2000);
+	reg.finish("r2", "error", errorState, 3000);
+
+	const r2 = reg.get("r2");
+	assert.equal(r2?.status, "error");
+	assert.equal(r2?.finishedAt, 3000);
+	assert.deepEqual(r2?.state, errorState);
+});

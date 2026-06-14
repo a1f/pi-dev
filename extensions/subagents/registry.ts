@@ -41,8 +41,13 @@ export class RunRegistry {
 		});
 	}
 
+	/** Mark a run terminal with its final status, folded state, and end time; unknown runId is a no-op. */
 	finish(runId: string, status: "done" | "error", state: RunState, finishedAt: number): void {
-		throw new Error("not implemented");
+		const record = this.#records.get(runId);
+		if (record === undefined) return;
+		record.status = status;
+		record.state = state;
+		record.finishedAt = finishedAt;
 	}
 
 	kill(runId: string): boolean {
