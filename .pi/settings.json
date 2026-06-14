@@ -1,7 +1,7 @@
 {
   "defaultProvider": "anthropic",
   "quietStartup": false,
-  "extensions": ["extensions/guardrails"],
+  "extensions": ["extensions/guardrails", "extensions/subagents"],
   "skills": [],
   "packages": []
 }

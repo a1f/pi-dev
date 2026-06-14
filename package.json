@@ -9,6 +9,7 @@
     "test": "node --test 'extensions/**/*.test.ts'"
   },
   "dependencies": {
+    "typebox": "1.1.38",
     "yaml": "^2.5.0"
   },
   "devDependencies": {
