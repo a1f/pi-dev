@@ -1,0 +1,10 @@
+{"sessionId":"s_0001","cwd":"/home/agent/pi-dev","model":"anthropic/claude-opus"}
+{"type":"agent_start"}
+{"type":"turn_start","turnIndex":0,"timestamp":1700000000000}
+{"type":"message_start","message":{"role":"assistant","content":[],"stopReason":null}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Let me read the README."},{"type":"tool_use","id":"t1","name":"read","input":{"path":"README.md"}}],"stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"README.md"}}
+not json
+{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":"# pi-dev\nSet up the dev VM with ...","isError":false}
+{"type":"turn_end","turnIndex":0,"message":{"role":"assistant","content":[{"type":"text","text":"The README explains how to set up the dev VM."}],"stopReason":"endTurn"},"toolResults":[]}
+{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"summarize the README"}]},{"role":"assistant","content":[{"type":"text","text":"Let me read the README."},{"type":"tool_use","id":"t1","name":"read","input":{"path":"README.md"}}],"stopReason":"toolUse"},{"role":"user","content":[{"type":"tool_result","toolCallId":"t1","content":"# pi-dev\nSet up the dev VM with ..."}]},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{"path":"README.md"}},{"type":"text","text":"The README explains how to set up the dev VM."}],"stopReason":"endTurn"}],"willRetry":false}
