@@ -28,6 +28,8 @@ function emptyRunState(): RunState {
 
 export class RunRegistry {
 	readonly #records = new Map<string, RunRecord>();
+	/** Per-run cancellation hooks, kept off the public record so callers can't fire them. */
+	readonly #onKill = new Map<string, () => void>();
 
 	/** Record a newly dispatched run as running, with an empty initial state. */
 	register(runId: string, task: string, startedAt: number, onKill?: () => void): void {
@@ -39,6 +41,7 @@ export class RunRegistry {
 			finishedAt: null,
 			state: emptyRunState(),
 		});
+		if (onKill !== undefined) this.#onKill.set(runId, onKill);
 	}
 
 	/** Mark a run terminal with its final status, folded state, and end time; unknown runId is a no-op. */
@@ -50,8 +53,13 @@ export class RunRegistry {
 		record.finishedAt = finishedAt;
 	}
 
+	/** Cancel a still-running run, firing its onKill hook; unknown or already-terminal runId is a no-op returning false. */
 	kill(runId: string): boolean {
-		throw new Error("not implemented");
+		const record = this.#records.get(runId);
+		if (record === undefined || record.status !== "running") return false;
+		this.#onKill.get(runId)?.();
+		record.status = "killed";
+		return true;
 	}
 
 	get(runId: string): RunRecord | undefined {

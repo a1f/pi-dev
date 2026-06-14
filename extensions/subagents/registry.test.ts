@@ -70,3 +70,36 @@ test("finish records the terminal status, final state, and finish time for both 
 	assert.equal(r2?.finishedAt, 3000);
 	assert.deepEqual(r2?.state, errorState);
 });
+
+test("kill terminates only a running run, firing its onKill hook, and is a no-op otherwise", () => {
+	const reg = new RunRegistry();
+
+	let r1Killed = false;
+	reg.register("r1", "summarize the readme", 1000, () => {
+		r1Killed = true;
+	});
+
+	assert.equal(reg.kill("r1"), true);
+	assert.equal(r1Killed, true);
+	assert.equal(reg.get("r1")?.status, "killed");
+
+	assert.equal(reg.kill("unknown"), false);
+
+	let r2Killed = false;
+	reg.register("r2", "build the thing", 2000, () => {
+		r2Killed = true;
+	});
+	const doneState: RunState = {
+		toolCount: 0,
+		lastLine: null,
+		contextTokens: null,
+		contextPct: null,
+		done: true,
+		malformed: 0,
+	};
+	reg.finish("r2", "done", doneState, 3000);
+
+	assert.equal(reg.kill("r2"), false);
+	assert.equal(r2Killed, false);
+	assert.equal(reg.get("r2")?.status, "done");
+});
