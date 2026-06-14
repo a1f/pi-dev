@@ -9,6 +9,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
+import { PERSONA_ERRORS } from "./constants.ts";
+
 /** Subdirectory of `<cwd>/.pi/` that holds persona markdown files. */
 export const AGENTS_DIRNAME = "agents";
 
@@ -24,20 +26,20 @@ export interface Persona {
 /** Parse a persona markdown file (`---` YAML frontmatter + body) into a Persona, never throwing. */
 export function parsePersona(content: string, source?: string): { persona: Persona } | { error: string } {
 	const split = splitFrontmatter(content);
-	if (split === null) return { error: "missing '---' frontmatter fence" };
+	if (split === null) return { error: PERSONA_ERRORS.noFence };
 	let parsed: unknown;
 	try {
 		parsed = parseYaml(split.yaml);
 	} catch (error) {
-		return { error: `invalid YAML frontmatter: ${messageOf(error)}` };
+		return { error: `${PERSONA_ERRORS.invalidYaml}: ${messageOf(error)}` };
 	}
-	if (!isMapping(parsed)) return { error: "frontmatter is not a YAML mapping" };
+	if (!isMapping(parsed)) return { error: PERSONA_ERRORS.notMapping };
 	const { name, description } = parsed;
 	if (typeof name !== "string" || name.trim() === "") {
-		return { error: "frontmatter is missing a non-empty 'name'" };
+		return { error: PERSONA_ERRORS.noName };
 	}
 	if (typeof description !== "string" || description.trim() === "") {
-		return { error: "frontmatter is missing a non-empty 'description'" };
+		return { error: PERSONA_ERRORS.noDescription };
 	}
 	const tools = readTools(parsed.tools);
 	if ("error" in tools) return tools;
@@ -91,14 +93,14 @@ type FieldResult<T> = { value: T } | { error: string };
 function readTools(value: unknown): FieldResult<readonly string[] | null> {
 	if (value === undefined || value === null) return { value: null };
 	if (isStringArray(value)) return { value };
-	return { error: "'tools' must be a sequence of strings" };
+	return { error: PERSONA_ERRORS.badTools };
 }
 
 /** An optional `model:` field: absent → null, a string → that string, anything else → error. */
 function readModel(value: unknown): FieldResult<string | null> {
 	if (value === undefined || value === null) return { value: null };
 	if (typeof value === "string") return { value };
-	return { error: "'model' must be a string" };
+	return { error: PERSONA_ERRORS.badModel };
 }
 
 function isStringArray(value: unknown): value is readonly string[] {

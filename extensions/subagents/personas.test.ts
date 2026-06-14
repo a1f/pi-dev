@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { PERSONA_ERRORS } from "./constants.ts";
 import { loadPersonas, parsePersona } from "./personas.ts";
 
 // loadPersonas scans <cwd>/.pi/agents; the fixtures provide a small workspace whose
@@ -59,22 +60,22 @@ test("parsePersona reports invalid input as an error naming the cause, without t
 	};
 
 	// (a) no frontmatter fence at all.
-	assert.match(expectError(parsePersona("Just a body, no frontmatter.")), /frontmatter|fence/);
+	assert.equal(expectError(parsePersona("Just a body, no frontmatter.")), PERSONA_ERRORS.noFence);
 
-	// (b) frontmatter that is not valid YAML (unterminated quote).
-	assert.match(expectError(parsePersona('---\nname: "unterminated\n---\nbody')), /YAML/);
+	// (b) frontmatter that is not valid YAML (unterminated quote): a prefix plus the underlying error.
+	assert.ok(expectError(parsePersona('---\nname: "unterminated\n---\nbody')).startsWith(PERSONA_ERRORS.invalidYaml));
 
 	// (c) frontmatter missing a non-empty name.
-	assert.match(expectError(parsePersona("---\ndescription: has no name\n---\nbody")), /name/);
+	assert.equal(expectError(parsePersona("---\ndescription: has no name\n---\nbody")), PERSONA_ERRORS.noName);
 
 	// (d) a whitespace-only description is rejected just like an empty name.
-	assert.match(expectError(parsePersona('---\nname: x\ndescription: "   "\n---\nbody')), /description/);
+	assert.equal(expectError(parsePersona('---\nname: x\ndescription: "   "\n---\nbody')), PERSONA_ERRORS.noDescription);
 
 	// Our explicit choice: a non-sequence `tools` is an error, not silently ignored.
-	assert.match(expectError(parsePersona("---\nname: x\ndescription: y\ntools: not-a-list\n---\nbody")), /tools/);
+	assert.equal(expectError(parsePersona("---\nname: x\ndescription: y\ntools: not-a-list\n---\nbody")), PERSONA_ERRORS.badTools);
 
 	// Our explicit choice: a non-string `model` is an error, not silently ignored.
-	assert.match(expectError(parsePersona("---\nname: x\ndescription: y\nmodel:\n  - a\n---\nbody")), /model/);
+	assert.equal(expectError(parsePersona("---\nname: x\ndescription: y\nmodel:\n  - a\n---\nbody")), PERSONA_ERRORS.badModel);
 });
 
 test("loadPersonas returns valid personas in filename order and warns about a malformed file", () => {
