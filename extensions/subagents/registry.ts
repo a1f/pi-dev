@@ -1,0 +1,59 @@
+// In-memory registry of subagent runs for the parent session.
+//
+// Holds the live record of every dispatched run — its task, lifecycle status,
+// timing, and latest folded RunState — keyed by runId so the parent can look one
+// up or list them all. Pure in-memory bookkeeping: no I/O lives here.
+
+import type { RunState } from "./runstate.ts";
+
+/** Lifecycle of a run: live, finished cleanly or with an error, or killed. */
+export type RunStatus = "running" | "done" | "error" | "killed";
+
+/** The live record the registry keeps for one dispatched run. */
+export interface RunRecord {
+	runId: string;
+	task: string;
+	status: RunStatus;
+	startedAt: number;
+	/** Wall-clock end time, or null while the run is still running. */
+	finishedAt: number | null;
+	/** Latest snapshot folded from the child's event stream. */
+	state: RunState;
+}
+
+/** The zero RunState a run starts from, before any child events are folded in. */
+function emptyRunState(): RunState {
+	return { toolCount: 0, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0 };
+}
+
+export class RunRegistry {
+	readonly #records = new Map<string, RunRecord>();
+
+	/** Record a newly dispatched run as running, with an empty initial state. */
+	register(runId: string, task: string, startedAt: number, onKill?: () => void): void {
+		this.#records.set(runId, {
+			runId,
+			task,
+			status: "running",
+			startedAt,
+			finishedAt: null,
+			state: emptyRunState(),
+		});
+	}
+
+	finish(runId: string, status: "done" | "error", state: RunState, finishedAt: number): void {
+		throw new Error("not implemented");
+	}
+
+	kill(runId: string): boolean {
+		throw new Error("not implemented");
+	}
+
+	get(runId: string): RunRecord | undefined {
+		return this.#records.get(runId);
+	}
+
+	list(): RunRecord[] {
+		return [...this.#records.values()];
+	}
+}
