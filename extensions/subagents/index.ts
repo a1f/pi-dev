@@ -12,9 +12,10 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, LABEL, LOG_COMMAND, RUNS_DIR, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
-import { formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
+import { RunRegistry, renderRows } from "./registry.ts";
+import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
 
 export default function (pi: ExtensionAPI): void {
 	const exec: ExecLike = (command, args, options) => pi.exec(command, args, options);
@@ -26,11 +27,21 @@ export default function (pi: ExtensionAPI): void {
 		await writeFile(logPath, content, "utf8");
 	};
 
-	// Run a child, then best-effort record the run as a parent-session audit entry.
-	// Shared by the /agent command and the agent_dispatch tool so logging + audit
-	// live in one place. A persistence failure must never break the dispatch.
+	// Live record of this session's dispatched runs, surfaced by the agent_status tool.
+	const registry = new RunRegistry();
+
+	// Track a run, dispatch the child, mark it finished, then best-effort record it as a
+	// parent-session audit entry. Shared by the /agent command and the agent_dispatch tool
+	// so tracking + logging + audit live in one place. The run is registered synchronously
+	// before the first await — so an in-flight dispatch is observable as "running" — and the
+	// same runId is threaded into runAgent so its log lines up. A persistence failure must
+	// never break the dispatch.
 	const dispatch = async (task: string, cwd: string): Promise<DispatchResult> => {
-		const result = await runAgent(task, exec, { timeoutMs: DEFAULT_TIMEOUT_MS, cwd, writeLog });
+		const runId = defaultRunId();
+		const startedAt = Date.now();
+		registry.register(runId, task, startedAt);
+		const result = await runAgent(task, exec, { timeoutMs: DEFAULT_TIMEOUT_MS, cwd, writeLog, runId });
+		registry.finish(runId, result.ok ? "done" : "error", result.state, Date.now());
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
@@ -75,6 +86,21 @@ export default function (pi: ExtensionAPI): void {
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 			const result = await dispatch(params.task, ctx.cwd);
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: STATUS_TOOL,
+		label: "Subagent status",
+		description: "List this session's dispatched subagents with their live status.",
+		parameters: Type.Object({}),
+		execute: async (_toolCallId, _params, _signal, _onUpdate, _ctx) => {
+			const runs = registry.list();
+			const text = runs.length === 0 ? "No subagent runs yet." : renderRows(runs, Date.now());
+			return {
+				content: [{ type: "text", text }],
+				details: { runs: runs.map((run) => ({ runId: run.runId, task: run.task, status: run.status })) },
+			};
 		},
 	});
 

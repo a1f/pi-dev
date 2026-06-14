@@ -10,6 +10,7 @@ import { buildSpawnArgv } from "./argv.ts";
 import { RUNS_DIR } from "./constants.ts";
 import { parseEventStream } from "./events.ts";
 import { formatRunLog, isSafeRunId, runLogName } from "./log.ts";
+import { reduceRunStateFromString, type RunState } from "./runstate.ts";
 
 /** The subset of a child-process result that runAgent consumes. */
 export interface ExecResultLike {
@@ -32,6 +33,8 @@ export interface DispatchResult {
 	finalText: string | null;
 	malformed: number;
 	code: number;
+	/** State folded from the child's event stream, so the registry can show the run's progress. */
+	state: RunState;
 	/** The run's id and log path when a child actually spawned; null on early-return paths. */
 	runId: string | null;
 	logPath: string | null;
@@ -44,8 +47,8 @@ export interface DispatchResult {
 /** Persists a run's log content to a path; injected so runAgent stays free of node:fs. */
 export type LogWriter = (logPath: string, content: string) => Promise<void>;
 
-/** Render the subagent's outcome as a follow-up message for the parent conversation. */
-export function formatReply(task: string, result: DispatchResult): string {
+/** Render the subagent's outcome as a follow-up message; it needs only the outcome, not the run's folded progress state. */
+export function formatReply(task: string, result: Omit<DispatchResult, "state">): string {
 	if (result.ok) {
 		return `Subagent finished "${task}":\n\n${result.finalText ?? ""}`;
 	}
@@ -58,6 +61,16 @@ export function formatReply(task: string, result: DispatchResult): string {
 /** No-op writer: the default so runAgent never needs node:fs unless a real writer is injected. */
 const noopWriteLog: LogWriter = async () => {};
 
+/** The zero RunState reported on early-return paths, before any child stream is folded. */
+const EMPTY_RUN_STATE: RunState = {
+	toolCount: 0,
+	lastLine: null,
+	contextTokens: null,
+	contextPct: null,
+	done: false,
+	malformed: 0,
+};
+
 /** Per-process counter so two same-millisecond dispatches never derive the same run id. */
 let runSeq = 0;
 
@@ -66,7 +79,7 @@ let runSeq = 0;
  * order stays chronological) plus a per-process sequence suffix, so concurrent or
  * same-millisecond dispatches get distinct ids — and thus distinct, non-clobbering log paths.
  */
-function defaultRunId(): string {
+export function defaultRunId(): string {
 	runSeq += 1;
 	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${runSeq}`;
 }
@@ -81,14 +94,14 @@ export async function runAgent(
 	// reason, never spawn a child or throw. Empty and argv-rejected tasks short-circuit
 	// before any run id or log exists, so they report null run/log and zero duration.
 	if (task.trim() === "") {
-		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, error: "task is required" };
+		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, state: EMPTY_RUN_STATE, error: "task is required" };
 	}
 	let argv: string[];
 	try {
 		argv = buildSpawnArgv({ task });
 	} catch (error) {
 		const reason: string = error instanceof Error ? error.message : String(error);
-		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, error: reason };
+		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, state: EMPTY_RUN_STATE, error: reason };
 	}
 	const runId = options?.runId ?? defaultRunId();
 	const logPath = join(options?.cwd ?? ".", RUNS_DIR, runLogName(runId));
@@ -96,6 +109,7 @@ export async function runAgent(
 	const result = await exec("pi", argv, { timeout: options?.timeoutMs, cwd: options?.cwd });
 	const durationMs = Date.now() - startedAt;
 	const parsed = parseEventStream(result.stdout);
+	const state = reduceRunStateFromString(result.stdout);
 	// Best-effort logging: a write failure must never derail the dispatch result, and an
 	// unsafe (path-traversing) runId is skipped rather than allowed to escape RUNS_DIR.
 	const writeLog = options?.writeLog ?? noopWriteLog;
@@ -115,5 +129,5 @@ export async function runAgent(
 			// Swallow: the run already happened; its outcome stands regardless of logging.
 		}
 	}
-	return { ok: parsed.done && result.code === 0, finalText: parsed.finalText, malformed: parsed.malformed, code: result.code, runId, logPath, durationMs };
+	return { ok: parsed.done && result.code === 0, finalText: parsed.finalText, malformed: parsed.malformed, code: result.code, runId, logPath, durationMs, state };
 }

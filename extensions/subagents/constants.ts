@@ -4,6 +4,7 @@
 export const LABEL = "subagents";
 export const COMMAND = "agent";
 export const TOOL = "agent_dispatch";
+export const STATUS_TOOL = "agent_status";
 
 /** Command that tails the most recent run's log. */
 export const LOG_COMMAND = "agent-log";
