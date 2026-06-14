@@ -40,7 +40,8 @@ export class RunRegistry {
 	readonly #onKill = new Map<string, () => void>();
 
 	/** Record a newly dispatched run as running, with an empty initial state. */
-	register(runId: string, task: string, startedAt: number, onKill?: () => void): void {
+	register(run: { runId: string; task: string; startedAt: number; onKill?: () => void }): void {
+		const { runId, task, startedAt, onKill } = run;
 		this.#records.set(runId, {
 			runId,
 			task,
@@ -53,7 +54,8 @@ export class RunRegistry {
 	}
 
 	/** Mark a still-running run terminal with its final status, folded state, and end time; a missing or already-terminal runId is a no-op, so a killed run is never overwritten by a late completion. */
-	finish(runId: string, status: "done" | "error", state: RunState, finishedAt: number): void {
+	finish(update: { runId: string; status: "done" | "error"; state: RunState; finishedAt: number }): void {
+		const { runId, status, state, finishedAt } = update;
 		const record = this.#records.get(runId);
 		if (record === undefined || record.status !== "running") return;
 		record.status = status;

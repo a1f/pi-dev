@@ -42,9 +42,9 @@ export default function (pi: ExtensionAPI): void {
 		// Wire kill to abort: registering onKill before the await keeps the in-flight run
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
-		registry.register(runId, task, startedAt, () => controller.abort());
+		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
 		const result = await runAgent(task, exec, { timeoutMs: DEFAULT_TIMEOUT_MS, cwd, writeLog, runId, signal: controller.signal });
-		registry.finish(runId, result.ok ? "done" : "error", result.state, Date.now());
+		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
