@@ -14,12 +14,12 @@ export interface ParsedRun {
 	malformed: number;
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
+export function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
 /** Join the `text` blocks of a message's content; null when there are none. */
-function joinTextBlocks(content: unknown): string | null {
+export function joinTextBlocks(content: unknown): string | null {
 	if (!Array.isArray(content)) return null;
 	const texts = content
 		.filter(

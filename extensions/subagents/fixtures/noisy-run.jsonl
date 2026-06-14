@@ -1,0 +1,10 @@
+{"type":"session","version":3,"id":"s_runstate_02","timestamp":"2026-06-14T00:01:00.000Z","cwd":"/home/agent/pi-dev"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+this is not json
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Checking the config now."}],"stopReason":"toolUse","usage":{"input":2000,"output":120,"cacheRead":400,"cacheWrite":20,"totalTokens":2540}}}
+{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":".pi/settings.json"}}
+
+{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":"{}","isError":false}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"The config is valid."}],"stopReason":"endTurn","usage":{"input":2200,"output":180,"cacheRead":420,"cacheWrite":24,"totalTokens":2824}},"toolResults":[]}
+{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"The config is valid."}],"stopReason":"endTurn"}],"willRetry":false}
