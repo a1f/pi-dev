@@ -5,7 +5,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { buildSpawnArgv } from "./argv.ts";
-import { type ExecLike, formatReply, runAgent } from "./runner.ts";
+import { RUNS_DIR } from "./constants.ts";
+import { runLogName } from "./log.ts";
+import { type ExecLike, formatReply, type LogWriter, runAgent } from "./runner.ts";
 
 // The fake exec returns the shared happy-path fixture (the same schema-accurate
 // stream events.test.ts asserts against) instead of spawning a real pi child,
@@ -29,6 +31,102 @@ test("runAgent dispatches a pi child and reports the happy-path outcome", async 
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0]?.command, "pi");
 	assert.deepEqual(calls[0]?.args, buildSpawnArgv({ task: "summarize the README" }));
+});
+
+test("runAgent writes the formatted run log via the injected writer at the expected path", async () => {
+	const writes: { logPath: string; content: string }[] = [];
+	const writeLog: LogWriter = async (logPath, content) => {
+		writes.push({ logPath, content });
+	};
+	const fakeExec: ExecLike = async () => ({
+		stdout: readFixture("summarize-readme.jsonl"),
+		stderr: "",
+		code: 0,
+		killed: false,
+	});
+
+	const result = await runAgent("summarize the README", fakeExec, {
+		writeLog,
+		runId: "2024-01-02T03-04-05",
+		cwd: "/work",
+	});
+
+	assert.equal(writes.length, 1, "a spawned run must write exactly one log");
+	const write = writes[0];
+	assert.ok(write);
+	assert.equal(write.logPath, join("/work", RUNS_DIR, runLogName("2024-01-02T03-04-05")));
+	assert.equal(result.runId, "2024-01-02T03-04-05");
+	assert.equal(result.logPath, write.logPath);
+
+	// The written content is the formatted log: valid-JSON run_start/run_end framing.
+	const lines = write.content.split("\n").filter((line) => line.trim() !== "");
+	const header = JSON.parse(lines[0] ?? "") as Record<string, unknown>;
+	assert.equal(header.type, "run_start");
+	assert.equal(header.runId, "2024-01-02T03-04-05");
+	const footer = JSON.parse(lines[lines.length - 1] ?? "") as Record<string, unknown>;
+	assert.equal(footer.type, "run_end");
+	assert.equal(footer.exitCode, 0);
+});
+
+test("a rejecting log writer does not break the dispatch result (best-effort logging)", async () => {
+	// Logging is auxiliary: a write failure must never throw out of runAgent or
+	// change the run's ok/finalText.
+	const writeLog: LogWriter = async () => {
+		throw new Error("disk full");
+	};
+	const fakeExec: ExecLike = async () => ({
+		stdout: readFixture("summarize-readme.jsonl"),
+		stderr: "",
+		code: 0,
+		killed: false,
+	});
+
+	const result = await runAgent("summarize the README", fakeExec, { writeLog, runId: "r1" });
+
+	assert.equal(result.ok, true);
+	assert.equal(result.finalText, "The README explains how to set up the dev VM.");
+});
+
+test("successive default-runId dispatches get distinct log paths (no same-millisecond collision)", async () => {
+	// Two dispatches that start within the same millisecond must not derive the same
+	// runId: identical ids share a logPath, and the second write truncates the first,
+	// silently corrupting the per-run audit trail. The default id must be per-call unique.
+	const fakeExec: ExecLike = async () => ({
+		stdout: readFixture("summarize-readme.jsonl"),
+		stderr: "",
+		code: 0,
+		killed: false,
+	});
+
+	const logPaths = new Set<string>();
+	for (let i = 0; i < 100; i++) {
+		const result = await runAgent("summarize the README", fakeExec, { cwd: "/work" });
+		assert.ok(result.logPath, "a spawned run must report a log path");
+		logPaths.add(result.logPath);
+	}
+
+	assert.equal(logPaths.size, 100, "every dispatch must derive a distinct run log path");
+});
+
+test("an unsafe runId is skipped rather than written outside the runs dir (best-effort)", async () => {
+	// runId is a public option; a traversal value like "../../escape" would join to a
+	// path outside RUNS_DIR. The writer must skip an unsafe id rather than escape, and
+	// the dispatch result must still stand.
+	const writes: { logPath: string; content: string }[] = [];
+	const writeLog: LogWriter = async (logPath, content) => {
+		writes.push({ logPath, content });
+	};
+	const fakeExec: ExecLike = async () => ({
+		stdout: readFixture("summarize-readme.jsonl"),
+		stderr: "",
+		code: 0,
+		killed: false,
+	});
+
+	const result = await runAgent("summarize the README", fakeExec, { writeLog, runId: "../../escape", cwd: "/work" });
+
+	assert.equal(writes.length, 0, "an unsafe runId must not trigger a write");
+	assert.equal(result.ok, true, "the run's outcome stands regardless of the skipped log");
 });
 
 test("runAgent reports failure when the child exits nonzero despite a complete stream", async () => {
@@ -84,6 +182,9 @@ test("formatReply quotes the task and answer on success, and signals failure wit
 		finalText: "The README explains the setup.",
 		malformed: 0,
 		code: 0,
+		runId: "r1",
+		logPath: "/work/.pi/runs/r1.jsonl",
+		durationMs: 5,
 	});
 
 	assert.ok(ok.includes("summarize the README"), "success reply should quote the task");
@@ -96,6 +197,9 @@ test("formatReply quotes the task and answer on success, and signals failure wit
 		finalText: null,
 		malformed: 0,
 		code: 1,
+		runId: null,
+		logPath: null,
+		durationMs: 0,
 	});
 
 	assert.ok(bad.includes("1"), "failure reply should include the exit code");

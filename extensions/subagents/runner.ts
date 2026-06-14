@@ -4,8 +4,12 @@
 // injected exec runs the child, and parseEventStream reads its JSON event stream.
 // Injecting exec keeps runAgent unit-testable without spawning a real pi.
 
+import { join } from "node:path";
+
 import { buildSpawnArgv } from "./argv.ts";
+import { RUNS_DIR } from "./constants.ts";
 import { parseEventStream } from "./events.ts";
+import { formatRunLog, isSafeRunId, runLogName } from "./log.ts";
 
 /** The subset of a child-process result that runAgent consumes. */
 export interface ExecResultLike {
@@ -28,9 +32,17 @@ export interface DispatchResult {
 	finalText: string | null;
 	malformed: number;
 	code: number;
+	/** The run's id and log path when a child actually spawned; null on early-return paths. */
+	runId: string | null;
+	logPath: string | null;
+	/** Wall-clock spent in exec (ms); 0 when no child spawned. */
+	durationMs: number;
 	/** Why the dispatch could not run at all (empty/invalid task); absent on a normal run. */
 	error?: string;
 }
+
+/** Persists a run's log content to a path; injected so runAgent stays free of node:fs. */
+export type LogWriter = (logPath: string, content: string) => Promise<void>;
 
 /** Render the subagent's outcome as a follow-up message for the parent conversation. */
 export function formatReply(task: string, result: DispatchResult): string {
@@ -43,25 +55,65 @@ export function formatReply(task: string, result: DispatchResult): string {
 	return `Subagent for "${task}" did not complete (exit ${result.code}).`;
 }
 
+/** No-op writer: the default so runAgent never needs node:fs unless a real writer is injected. */
+const noopWriteLog: LogWriter = async () => {};
+
+/** Per-process counter so two same-millisecond dispatches never derive the same run id. */
+let runSeq = 0;
+
+/**
+ * A sortable, filesystem-safe run id: a millisecond wall-clock timestamp (so lexical
+ * order stays chronological) plus a per-process sequence suffix, so concurrent or
+ * same-millisecond dispatches get distinct ids — and thus distinct, non-clobbering log paths.
+ */
+function defaultRunId(): string {
+	runSeq += 1;
+	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${runSeq}`;
+}
+
 /** Dispatch a one-shot pi child for `task` and report its parsed outcome. */
 export async function runAgent(
 	task: string,
 	exec: ExecLike,
-	options?: { timeoutMs?: number; cwd?: string },
+	options?: { timeoutMs?: number; cwd?: string; writeLog?: LogWriter; runId?: string },
 ): Promise<DispatchResult> {
 	// Stay total over the pi adapter: a task we cannot launch must resolve with a
-	// reason, never spawn a child or throw. Empty and argv-rejected tasks short-circuit.
+	// reason, never spawn a child or throw. Empty and argv-rejected tasks short-circuit
+	// before any run id or log exists, so they report null run/log and zero duration.
 	if (task.trim() === "") {
-		return { ok: false, finalText: null, malformed: 0, code: 1, error: "task is required" };
+		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, error: "task is required" };
 	}
 	let argv: string[];
 	try {
 		argv = buildSpawnArgv({ task });
 	} catch (error) {
 		const reason: string = error instanceof Error ? error.message : String(error);
-		return { ok: false, finalText: null, malformed: 0, code: 1, error: reason };
+		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, error: reason };
 	}
+	const runId = options?.runId ?? defaultRunId();
+	const logPath = join(options?.cwd ?? ".", RUNS_DIR, runLogName(runId));
+	const startedAt = Date.now();
 	const result = await exec("pi", argv, { timeout: options?.timeoutMs, cwd: options?.cwd });
+	const durationMs = Date.now() - startedAt;
 	const parsed = parseEventStream(result.stdout);
-	return { ok: parsed.done && result.code === 0, finalText: parsed.finalText, malformed: parsed.malformed, code: result.code };
+	// Best-effort logging: a write failure must never derail the dispatch result, and an
+	// unsafe (path-traversing) runId is skipped rather than allowed to escape RUNS_DIR.
+	const writeLog = options?.writeLog ?? noopWriteLog;
+	if (isSafeRunId(runId)) {
+		try {
+			const content = formatRunLog({
+				runId,
+				task,
+				argv,
+				events: result.stdout,
+				exitCode: result.code,
+				durationMs,
+				malformed: parsed.malformed,
+			});
+			await writeLog(logPath, content);
+		} catch {
+			// Swallow: the run already happened; its outcome stands regardless of logging.
+		}
+	}
+	return { ok: parsed.done && result.code === 0, finalText: parsed.finalText, malformed: parsed.malformed, code: result.code, runId, logPath, durationMs };
 }
