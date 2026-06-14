@@ -21,6 +21,7 @@ npm-debug.log*
 # pi runtime state (per-worktree, lives inside the worktree, not in main)
 .pi/sessions/
 .pi/cache/
+.pi/runs/
 
 # editors / OS / agent harness state
 .vscode/

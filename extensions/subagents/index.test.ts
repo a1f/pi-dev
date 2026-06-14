@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { AUDIT_TYPE, COMMAND, LOG_COMMAND, RUNS_DIR } from "./constants.ts";
 import subagents from "./index.ts";
+import { type SubagentRunAudit } from "./log.ts";
 
 // Drive the real extension default export against a fake pi so the inject-link
 // is exercised end to end: the command handler must run runAgent over pi.exec,
@@ -30,26 +34,38 @@ interface SentMessage {
 	options: { deliverAs?: string } | undefined;
 }
 
+interface AuditCall {
+	customType: string;
+	data: unknown;
+}
+
 interface FakePi {
 	commandHandler: CommandHandler | undefined;
+	logHandler: CommandHandler | undefined;
 	tool: ToolDef | undefined;
 	execCalls: ExecCall[];
 	sent: SentMessage[];
+	audits: AuditCall[];
+	/** When set, pi.appendEntry throws so tests can exercise the best-effort swallow. */
+	appendThrows: boolean;
 	pi: ExtensionAPI;
 }
 
 function makeFakePi(): FakePi {
 	const fake: FakePi = {
 		commandHandler: undefined,
+		logHandler: undefined,
 		tool: undefined,
 		execCalls: [],
 		sent: [],
+		audits: [],
+		appendThrows: false,
 		pi: undefined as unknown as ExtensionAPI,
 	};
 	const pi = {
 		registerCommand(name: string, options: { handler: CommandHandler }): void {
-			assert.equal(name, "agent");
-			fake.commandHandler = options.handler;
+			if (name === COMMAND) fake.commandHandler = options.handler;
+			else if (name === LOG_COMMAND) fake.logHandler = options.handler;
 		},
 		registerTool(tool: ToolDef): void {
 			fake.tool = tool;
@@ -61,10 +77,16 @@ function makeFakePi(): FakePi {
 		sendUserMessage(content: string | unknown[], options?: { deliverAs?: string }): void {
 			fake.sent.push({ content, options });
 		},
+		appendEntry(customType: string, data?: unknown): void {
+			if (fake.appendThrows) throw new Error("append failed");
+			fake.audits.push({ customType, data });
+		},
 	};
 	fake.pi = pi as unknown as ExtensionAPI;
 	return fake;
 }
+
+const tempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), "subagents-"));
 
 const fakeCtx = { cwd: "/tmp", ui: { notify() {} }, hasUI: false };
 const commandCtx = fakeCtx as unknown as CommandCtx;
@@ -99,6 +121,47 @@ test("command handler handles an invalid task without throwing or spawning", asy
 	assert.ok(!/\bfinished\b/i.test(delivered), "an unlaunchable task must not read as a successful run");
 });
 
+test("a dispatch records a parent-session audit entry capturing the run's outcome", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	// A real temp cwd so the real writeLog has somewhere to land; we assert on the audit.
+	const dir = await tempCwd();
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.commandHandler("summarize the README", ctx);
+
+	assert.equal(fake.audits.length, 1, "a completed run must record exactly one audit entry");
+	const audit = fake.audits[0];
+	assert.ok(audit);
+	assert.equal(audit.customType, AUDIT_TYPE);
+	const data = audit.data as SubagentRunAudit;
+	assert.equal(data.task, "summarize the README");
+	assert.equal(data.ok, true);
+	assert.equal(data.exitCode, 0);
+	assert.ok(typeof data.runId === "string" && data.runId.length > 0, "the audit must carry the run id");
+	assert.ok(data.logPath.endsWith(".jsonl"), "the audit must point at the run's log file");
+});
+
+test("a dispatch still delivers the answer when audit persistence throws", async () => {
+	// Audit persistence is best-effort: an appendEntry failure must not derail the
+	// dispatch — the subagent's answer must still reach the parent conversation.
+	const fake = makeFakePi();
+	fake.appendThrows = true;
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await assert.doesNotReject(fake.commandHandler("summarize the README", ctx));
+
+	const sent = fake.sent[0];
+	assert.ok(sent, "the follow-up must still be delivered when the audit throws");
+	assert.ok(typeof sent.content === "string" && sent.content.includes(ANSWER), "the answer must survive a failed audit");
+});
+
 test("the agent_dispatch tool returns the subagent answer as its text content", async () => {
 	const fake = makeFakePi();
 	subagents(fake.pi);
@@ -109,4 +172,67 @@ test("the agent_dispatch tool returns the subagent answer as its text content", 
 	assert.equal(fake.execCalls.length, 1, "the tool must spawn exactly one child");
 	const block = result.content[0];
 	assert.ok(block && block.type === "text" && block.text.includes(ANSWER), "the tool result must include the subagent's answer");
+});
+
+interface Note {
+	msg: string;
+	level: string;
+}
+
+const notifyingCtx = (cwd: string, notes: Note[]): CommandCtx =>
+	({ cwd, ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) }, hasUI: false }) as unknown as CommandCtx;
+
+test("/agent-log notifies the rendered tail of the most recent run log", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.logHandler, "the extension must register the agent-log command");
+
+	const dir = await tempCwd();
+	const runsDir = join(dir, RUNS_DIR);
+	await mkdir(runsDir, { recursive: true });
+	await writeFile(join(runsDir, "2024-01-01T00-00-00.jsonl"), '{"type":"run_start"}\nstale\n', "utf8");
+	await writeFile(join(runsDir, "2024-06-01T00-00-00.jsonl"), '{"type":"run_start"}\nnewest\n', "utf8");
+
+	const notes: Note[] = [];
+	await fake.logHandler("", notifyingCtx(dir, notes));
+
+	assert.equal(notes.length, 1, "the tail must be shown once");
+	const note = notes[0];
+	assert.ok(note);
+	assert.ok(note.msg.includes("2024-06-01T00-00-00.jsonl"), "the tail must come from the newest run, named in the message");
+	assert.ok(note.msg.includes("newest"), "the tail must carry the newest run's content");
+	assert.ok(!note.msg.includes("stale"), "an older run's content must not leak into the tail");
+});
+
+test("/agent-log reports no runs when the runs dir is absent, without throwing", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.logHandler, "the extension must register the agent-log command");
+
+	const dir = await tempCwd(); // no .pi/runs/ inside it
+	const notes: Note[] = [];
+	await assert.doesNotReject(fake.logHandler("", notifyingCtx(dir, notes)));
+
+	assert.equal(notes.length, 1, "a friendly message must still be shown");
+	assert.ok(/no .*run/i.test(notes[0]?.msg ?? ""), "the message must read as 'no runs yet'");
+});
+
+test("/agent-log warns once when the most recent run log cannot be read", async () => {
+	// A directory whose name looks like a log file is listed by readdir yet rejects
+	// readFile (EISDIR). The handler must surface a single warning and never throw.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.logHandler, "the extension must register the agent-log command");
+
+	const dir = await tempCwd();
+	await mkdir(join(dir, RUNS_DIR, "2024-06-01T00-00-00.jsonl"), { recursive: true });
+
+	const notes: Note[] = [];
+	await assert.doesNotReject(fake.logHandler("", notifyingCtx(dir, notes)));
+
+	assert.equal(notes.length, 1, "an unreadable run log must warn exactly once");
+	const note = notes[0];
+	assert.ok(note);
+	assert.match(note.msg, /could not read run log/);
+	assert.equal(note.level, "warning");
 });
