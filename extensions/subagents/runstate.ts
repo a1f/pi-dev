@@ -28,12 +28,12 @@ export interface ReduceOptions {
 
 /** Last non-empty line of `text` (trimmed), or null when every line is blank. */
 function lastNonEmptyLine(text: string): string | null {
-	let result: string | null = null;
-	for (const rawLine of text.split("\n")) {
-		const line = rawLine.trim();
-		if (line !== "") result = line;
+	const lines = text.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i]?.trim();
+		if (line) return line;
 	}
-	return result;
+	return null;
 }
 
 /** Numeric field of an object, or 0 when absent or non-numeric. */
@@ -50,6 +50,27 @@ function usageTokens(usage: Record<string, unknown>): number {
 			numberField(usage.cacheRead) +
 			numberField(usage.cacheWrite)
 	);
+}
+
+/** Live-state an assistant message contributes; null fields leave the prior value unchanged. */
+interface MessageSnapshot {
+	/** Last non-empty assistant line, or null when the message carries no text. */
+	line: string | null;
+	/** Context tokens from valid (non-aborted/error) usage, or null when absent. */
+	tokens: number | null;
+}
+
+/** Extract the lastLine / contextTokens an assistant message_end or turn_end event contributes. */
+function assistantSnapshot(message: unknown): MessageSnapshot {
+	if (!isObject(message) || message.role !== "assistant") return { line: null, tokens: null };
+	const text = joinTextBlocks(message.content);
+	const line = text !== null ? lastNonEmptyLine(text) : null;
+	const usage = message.usage;
+	const tokens =
+		isObject(usage) && message.stopReason !== "aborted" && message.stopReason !== "error"
+			? usageTokens(usage)
+			: null;
+	return { line, tokens };
 }
 
 export function reduceRunState(lines: Iterable<string>, opts?: ReduceOptions): RunState {
@@ -75,17 +96,9 @@ export function reduceRunState(lines: Iterable<string>, opts?: ReduceOptions): R
 		} else if (event.type === "agent_end" && event.willRetry !== true) {
 			done = true;
 		} else if (event.type === "message_end" || event.type === "turn_end") {
-			const message = event.message;
-			if (!isObject(message) || message.role !== "assistant") continue;
-			const text = joinTextBlocks(message.content);
-			if (text !== null) {
-				const candidate = lastNonEmptyLine(text);
-				if (candidate !== null) lastLine = candidate;
-			}
-			const usage = message.usage;
-			if (isObject(usage) && message.stopReason !== "aborted" && message.stopReason !== "error") {
-				contextTokens = usageTokens(usage);
-			}
+			const snapshot = assistantSnapshot(event.message);
+			if (snapshot.line !== null) lastLine = snapshot.line;
+			if (snapshot.tokens !== null) contextTokens = snapshot.tokens;
 		}
 	}
 
