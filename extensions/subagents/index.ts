@@ -7,6 +7,7 @@
 
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Type } from "typebox";
 
@@ -14,8 +15,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
+import { loadPersonas, type Persona, resolveDispatch } from "./personas.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
 import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
+
+// The guardrails extension is a sibling dir (extensions/guardrails), resolved from this file's
+// location so it is correct regardless of the parent session's cwd. Every spawned child loads it
+// explicitly: `--no-extensions` only disables discovery, so the safety net must be passed by path.
+const GUARDRAILS_EXTENSION = join(dirname(fileURLToPath(import.meta.url)), "..", "guardrails");
 
 export default function (pi: ExtensionAPI): void {
 	const exec: ExecLike = (command, args, options) => pi.exec(command, args, options);
@@ -30,20 +37,35 @@ export default function (pi: ExtensionAPI): void {
 	// Live record of this session's dispatched runs, surfaced by the agent_status tool.
 	const registry = new RunRegistry();
 
-	// Track a run, dispatch the child, mark it finished, then best-effort record it as a
-	// parent-session audit entry. Shared by the /agent command and the agent_dispatch tool
-	// so tracking + logging + audit live in one place. The run is registered synchronously
-	// before the first await — so an in-flight dispatch is observable as "running" — and the
-	// same runId is threaded into runAgent so its log lines up. A persistence failure must
-	// never break the dispatch.
-	const dispatch = async (task: string, cwd: string): Promise<DispatchResult> => {
+	// Track a run, dispatch the child (with its persona + guardrails), mark it finished, then
+	// best-effort record it as a parent-session audit entry. Shared by the /agent command and the
+	// agent_dispatch tool so tracking + logging + audit live in one place. The run is registered
+	// synchronously before the first await — so an in-flight dispatch is observable as "running" —
+	// and the same runId is threaded into runAgent so its log lines up. A persona (when matched)
+	// supplies the child's tools/model/system prompt — null fields fall back to buildSpawnArgv's
+	// defaults — and every child loads guardrails regardless. A persistence failure must never
+	// break the dispatch.
+	const dispatch = async (task: string, cwd: string, persona: Persona | null): Promise<DispatchResult> => {
 		const runId = defaultRunId();
 		const startedAt = Date.now();
 		// Wire kill to abort: registering onKill before the await keeps the in-flight run
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
 		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
-		const result = await runAgent(task, exec, { timeoutMs: DEFAULT_TIMEOUT_MS, cwd, writeLog, runId, signal: controller.signal });
+		const result = await runAgent(task, exec, {
+			timeoutMs: DEFAULT_TIMEOUT_MS,
+			cwd,
+			writeLog,
+			runId,
+			signal: controller.signal,
+			extensions: [GUARDRAILS_EXTENSION],
+			tools: persona?.tools ?? undefined,
+			model: persona?.model ?? undefined,
+			// An empty/whitespace-only persona body trims to "" upstream; map it to undefined so
+			// buildSpawnArgv omits --system-prompt and the child keeps its default, rather than
+			// emitting `--system-prompt ""` and replacing that default with nothing.
+			systemPrompt: persona?.systemPrompt || undefined,
+		});
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
@@ -69,12 +91,17 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerCommand(COMMAND, {
 		description: "Dispatch a headless read-only subagent to perform <task>; its answer is injected as a follow-up.",
 		handler: async (args, ctx) => {
-			const task = args.trim();
+			// A leading token matching a project persona selects it; the remainder is the task.
+			// Surface persona-load warnings (a malformed file is skipped, never silently dropped),
+			// mirroring the guardrails sibling's notify pattern, before resolving the dispatch.
+			const { personas, warnings } = loadPersonas(ctx.cwd);
+			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
+			const { persona, task } = resolveDispatch(args, personas);
 			if (task === "") {
-				ctx.ui.notify(`[${LABEL}] usage: /${COMMAND} <task>`, "warning");
+				ctx.ui.notify(`[${LABEL}] usage: /${COMMAND} [persona] <task>`, "warning");
 				return;
 			}
-			const result = await dispatch(task, ctx.cwd);
+			const result = await dispatch(task, ctx.cwd, persona);
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -87,7 +114,7 @@ export default function (pi: ExtensionAPI): void {
 			task: Type.String({ description: "The task for the subagent to perform." }),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			const result = await dispatch(params.task, ctx.cwd);
+			const result = await dispatch(params.task, ctx.cwd, null);
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
 		},
 	});

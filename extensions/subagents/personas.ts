@@ -3,6 +3,7 @@
 // Pure and total, mirroring guardrails/rules.ts (load → parse → warn): parsePersona
 // maps a markdown string to a Persona or an error and never throws on bad input, and
 // loadPersonas reads <cwd>/.pi/agents/*.md, skipping malformed files with a warning.
+// resolveDispatch (pure, no I/O) splits a `/agent` argument into a persona + task.
 // No pi runtime, no child_process, no mutation — it only reads from disk.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -54,6 +55,21 @@ export function parsePersona(content: string, source?: string): { persona: Perso
 		source: source ?? null,
 	};
 	return { persona };
+}
+
+/**
+ * Resolve a `/agent` argument string into a persona + task. The first whitespace-delimited
+ * token selects a persona by exact name and the trimmed remainder becomes the task; an
+ * unrecognized first token means no persona, so the whole trimmed string is the task. A bare
+ * persona name leaves the task empty for the caller to reject as a usage error.
+ */
+export function resolveDispatch(args: string, personas: readonly Persona[]): { persona: Persona | null; task: string } {
+	const trimmed = args.trim();
+	const space = trimmed.search(/\s/);
+	const name = space === -1 ? trimmed : trimmed.slice(0, space);
+	const persona = personas.find((candidate) => candidate.name === name) ?? null;
+	if (persona === null) return { persona: null, task: trimmed };
+	return { persona, task: space === -1 ? "" : trimmed.slice(space + 1).trim() };
 }
 
 /**

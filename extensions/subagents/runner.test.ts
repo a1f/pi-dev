@@ -33,6 +33,29 @@ test("runAgent dispatches a pi child and reports the happy-path outcome", async 
 	assert.deepEqual(calls[0]?.args, buildSpawnArgv({ task: "summarize the README" }));
 });
 
+test("runAgent forwards tools, model, system prompt and extensions into the spawned argv", async () => {
+	// The adapter passes a persona's tools/model/system prompt and the guardrails extension
+	// through runAgent; the argv handed to exec must reflect all of them (and is what gets logged).
+	const calls: { command: string; args: string[] }[] = [];
+	const fakeExec: ExecLike = async (command, args) => {
+		calls.push({ command, args });
+		return { stdout: readFixture("summarize-readme.jsonl"), stderr: "", code: 0, killed: false };
+	};
+
+	await runAgent("review the diff", fakeExec, {
+		tools: ["read", "grep"],
+		model: "opus",
+		systemPrompt: "You are a reviewer.",
+		extensions: ["/abs/guardrails"],
+	});
+
+	assert.equal(calls.length, 1);
+	assert.deepEqual(
+		calls[0]?.args,
+		buildSpawnArgv({ task: "review the diff", tools: ["read", "grep"], model: "opus", systemPrompt: "You are a reviewer.", extensions: ["/abs/guardrails"] }),
+	);
+});
+
 test("runAgent writes the formatted run log via the injected writer at the expected path", async () => {
 	const writes: { logPath: string; content: string }[] = [];
 	const writeLog: LogWriter = async (logPath, content) => {

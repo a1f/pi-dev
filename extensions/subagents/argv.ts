@@ -19,6 +19,14 @@ export interface SpawnArgvOptions {
 	tools?: readonly string[];
 	/** Optional model override (`--model <pattern>`). */
 	model?: string;
+	/** Optional system prompt for the child (`--system-prompt <text>`); replaces, never appends. */
+	systemPrompt?: string;
+	/**
+	 * Extensions to load explicitly (`--extension <path>` each). These survive `--no-extensions`,
+	 * which only disables auto-discovery — so a child keeps the recursion guard yet can still be
+	 * handed the guardrails safety net.
+	 */
+	extensions?: readonly string[];
 }
 
 /**
@@ -37,5 +45,7 @@ export function buildSpawnArgv(options: SpawnArgvOptions): string[] {
 	}
 	const tools = options.tools ?? READONLY_TOOLS;
 	const model = options.model === undefined ? [] : ["--model", options.model];
-	return ["--mode", "json", ...model, "--no-extensions", "--tools", tools.join(","), "-p", options.task];
+	const systemPrompt = options.systemPrompt === undefined ? [] : ["--system-prompt", options.systemPrompt];
+	const extensions = (options.extensions ?? []).flatMap((path) => ["--extension", path]);
+	return ["--mode", "json", ...model, ...systemPrompt, "--no-extensions", ...extensions, "--tools", tools.join(","), "-p", options.task];
 }
