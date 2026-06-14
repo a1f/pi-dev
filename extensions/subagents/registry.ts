@@ -9,6 +9,14 @@ import type { RunState } from "./runstate.ts";
 /** Lifecycle of a run: live, finished cleanly or with an error, or killed. */
 export type RunStatus = "running" | "done" | "error" | "killed";
 
+/** Single-glyph status marker shown at the head of each rendered row. */
+const STATUS_GLYPH: Record<RunStatus, string> = {
+	running: "▶",
+	done: "✓",
+	error: "✗",
+	killed: "⊘",
+};
+
 /** The live record the registry keeps for one dispatched run. */
 export interface RunRecord {
 	runId: string;
@@ -69,4 +77,25 @@ export class RunRegistry {
 	list(): RunRecord[] {
 		return [...this.#records.values()];
 	}
+}
+
+/** Render one run as a single status line; omits the last-line cell when the run has produced none. */
+function renderRow(record: RunRecord, now: number): string {
+	const { state } = record;
+	const elapsedMs = (record.finishedAt ?? now) - record.startedAt;
+	const context = state.contextPct === null ? "—" : `${Math.round(state.contextPct)}%`;
+	const cells = [
+		STATUS_GLYPH[record.status],
+		record.task,
+		`${Math.floor(elapsedMs / 1000)}s`,
+		`${state.toolCount} tools`,
+		context,
+	];
+	if (state.lastLine !== null) cells.push(state.lastLine);
+	return cells.join(" · ");
+}
+
+/** Render the registry as one human-readable status line per run, in list order, joined by newlines. */
+export function renderRows(records: readonly RunRecord[], now: number): string {
+	return records.map((record) => renderRow(record, now)).join("\n");
 }

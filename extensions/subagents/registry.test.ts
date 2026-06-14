@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RunRegistry } from "./registry.ts";
+import { RunRegistry, renderRows } from "./registry.ts";
 import type { RunRecord } from "./registry.ts";
 import type { RunState } from "./runstate.ts";
 
@@ -102,4 +102,39 @@ test("kill terminates only a running run, firing its onKill hook, and is a no-op
 	assert.equal(reg.kill("r2"), false);
 	assert.equal(r2Killed, false);
 	assert.equal(reg.get("r2")?.status, "done");
+});
+
+test("renderRows renders one line per run with its glyph, task, elapsed seconds, tool count, context, and last line", () => {
+	const reg = new RunRegistry();
+	reg.register("r1", "scout repo", 1000);
+
+	const doneState: RunState = {
+		toolCount: 5,
+		lastLine: "All set.",
+		contextTokens: 24000,
+		contextPct: 12,
+		done: true,
+		malformed: 0,
+	};
+	reg.register("r2", "summarize", 1000);
+	reg.finish("r2", "done", doneState, 2000);
+
+	const out = renderRows(reg.list(), 4500);
+	const lines = out.split("\n");
+	assert.equal(lines.length, 2);
+
+	const runningLine = lines.find((line) => line.includes("▶"));
+	assert.ok(runningLine, "expected a running row marked with ▶");
+	assert.ok(runningLine.includes("scout repo"));
+	assert.ok(runningLine.includes("3s"));
+	assert.ok(runningLine.includes("0 tools"));
+	assert.ok(runningLine.includes("—"));
+
+	const doneLine = lines.find((line) => line.includes("✓"));
+	assert.ok(doneLine, "expected a done row marked with ✓");
+	assert.ok(doneLine.includes("summarize"));
+	assert.ok(doneLine.includes("1s"));
+	assert.ok(doneLine.includes("5 tools"));
+	assert.ok(doneLine.includes("12%"));
+	assert.ok(doneLine.includes("All set."));
 });
