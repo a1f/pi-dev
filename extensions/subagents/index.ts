@@ -12,7 +12,7 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
 import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
@@ -39,8 +39,11 @@ export default function (pi: ExtensionAPI): void {
 	const dispatch = async (task: string, cwd: string): Promise<DispatchResult> => {
 		const runId = defaultRunId();
 		const startedAt = Date.now();
-		registry.register(runId, task, startedAt);
-		const result = await runAgent(task, exec, { timeoutMs: DEFAULT_TIMEOUT_MS, cwd, writeLog, runId });
+		// Wire kill to abort: registering onKill before the await keeps the in-flight run
+		// observable as running, and aborting the controller cancels the child's exec.
+		const controller = new AbortController();
+		registry.register(runId, task, startedAt, () => controller.abort());
+		const result = await runAgent(task, exec, { timeoutMs: DEFAULT_TIMEOUT_MS, cwd, writeLog, runId, signal: controller.signal });
 		registry.finish(runId, result.ok ? "done" : "error", result.state, Date.now());
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
@@ -101,6 +104,20 @@ export default function (pi: ExtensionAPI): void {
 				content: [{ type: "text", text }],
 				details: { runs: runs.map((run) => ({ runId: run.runId, task: run.task, status: run.status })) },
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: KILL_TOOL,
+		label: "Kill subagent",
+		description: "Abort a still-running dispatched subagent by run id.",
+		parameters: Type.Object({
+			runId: Type.String({ description: "The run id of the subagent to kill, as reported by agent_status." }),
+		}),
+		execute: async (_toolCallId, { runId }, _signal, _onUpdate, _ctx) => {
+			const killed = registry.kill(runId);
+			const text = killed ? `Killed subagent run ${runId}.` : `No running subagent with run id ${runId}.`;
+			return { content: [{ type: "text", text }], details: { killed } };
 		},
 	});
 

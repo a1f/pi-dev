@@ -52,10 +52,10 @@ export class RunRegistry {
 		if (onKill !== undefined) this.#onKill.set(runId, onKill);
 	}
 
-	/** Mark a run terminal with its final status, folded state, and end time; unknown runId is a no-op. */
+	/** Mark a still-running run terminal with its final status, folded state, and end time; a missing or already-terminal runId is a no-op, so a killed run is never overwritten by a late completion. */
 	finish(runId: string, status: "done" | "error", state: RunState, finishedAt: number): void {
 		const record = this.#records.get(runId);
-		if (record === undefined) return;
+		if (record === undefined || record.status !== "running") return;
 		record.status = status;
 		record.state = state;
 		record.finishedAt = finishedAt;

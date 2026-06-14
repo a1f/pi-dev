@@ -88,7 +88,7 @@ export function defaultRunId(): string {
 export async function runAgent(
 	task: string,
 	exec: ExecLike,
-	options?: { timeoutMs?: number; cwd?: string; writeLog?: LogWriter; runId?: string },
+	options?: { timeoutMs?: number; cwd?: string; writeLog?: LogWriter; runId?: string; signal?: AbortSignal },
 ): Promise<DispatchResult> {
 	// Stay total over the pi adapter: a task we cannot launch must resolve with a
 	// reason, never spawn a child or throw. Empty and argv-rejected tasks short-circuit
@@ -106,7 +106,7 @@ export async function runAgent(
 	const runId = options?.runId ?? defaultRunId();
 	const logPath = join(options?.cwd ?? ".", RUNS_DIR, runLogName(runId));
 	const startedAt = Date.now();
-	const result = await exec("pi", argv, { timeout: options?.timeoutMs, cwd: options?.cwd });
+	const result = await exec("pi", argv, { timeout: options?.timeoutMs, cwd: options?.cwd, signal: options?.signal });
 	const durationMs = Date.now() - startedAt;
 	const parsed = parseEventStream(result.stdout);
 	const state = reduceRunStateFromString(result.stdout);
