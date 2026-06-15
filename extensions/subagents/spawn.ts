@@ -6,12 +6,16 @@
 // boundary, so injecting SpawnDeps keeps the wiring unit-testable with a fake
 // child and fake timers — no real process, no real clock.
 //
-// This slice handles only a clean exit; timeout/abort/SIGTERM→SIGKILL
-// escalation (signal/timeout/graceMs) is a later slice with its own test.
+// This slice handles a clean exit and timeout-driven SIGTERM→SIGKILL
+// escalation; AbortSignal handling (the `signal` option) is a later slice
+// with its own test.
 
 import { spawn as nodeSpawn } from "node:child_process";
 
 import type { ExecResultLike } from "./runner.ts";
+
+/** Default SIGTERM→SIGKILL grace window when a caller omits graceMs, matching pi.exec's prior 5s grace. */
+const DEFAULT_GRACE_MS = 5000;
 
 /** A stdout/stderr stream narrowed to the one `.on("data", …)` this wrapper reads. */
 export interface ReadableLike {
@@ -30,7 +34,7 @@ export interface ChildLike {
 	on(event: "error", listener: (error: Error) => void): this;
 }
 
-/** Per-run knobs; only cwd and onSpawn act this slice, signal/timeout/graceMs are the stable surface the escalation slice consumes. */
+/** Per-run knobs; cwd, onSpawn, timeout and graceMs act this slice, signal is the stable surface the abort slice will consume. */
 export interface SpawnExecOptions {
 	signal?: AbortSignal;
 	timeout?: number;
@@ -55,6 +59,9 @@ export function makeSpawnExec(deps: SpawnDeps): SpawnExec {
 			const child = deps.spawn(command, args, { cwd: options?.cwd });
 			const stdoutChunks: string[] = [];
 			const stderrChunks: string[] = [];
+			let killed = false;
+			let cancelTimeout: () => void = () => {};
+			let cancelGrace: () => void = () => {};
 
 			// Report the pid once, as soon as it exists, so callers can track the live run.
 			if (child.pid !== undefined) {
@@ -68,10 +75,25 @@ export function makeSpawnExec(deps: SpawnDeps): SpawnExec {
 				stderrChunks.push(chunk.toString());
 			});
 
-			// A clean exit issues no kill, so killed stays false on this path; the
-			// escalation slice will set it when it actually signals the child.
+			// A run that overruns its timeout is SIGTERMed and marked killed at once, then
+			// SIGKILLed if it is still alive when the grace window elapses.
+			const timeoutMs = options?.timeout;
+			if (timeoutMs !== undefined && timeoutMs > 0) {
+				cancelTimeout = deps.schedule(() => {
+					killed = true;
+					child.kill("SIGTERM");
+					cancelGrace = deps.schedule(() => {
+						child.kill("SIGKILL");
+					}, options?.graceMs ?? DEFAULT_GRACE_MS);
+				}, timeoutMs);
+			}
+
+			// Cancel any pending escalation timers on exit so a clean exit never triggers a
+			// late SIGKILL; killed reflects whether the timeout path fired.
 			child.on("exit", (code) => {
-				resolve({ stdout: stdoutChunks.join(""), stderr: stderrChunks.join(""), code: code ?? 0, killed: false });
+				cancelTimeout();
+				cancelGrace();
+				resolve({ stdout: stdoutChunks.join(""), stderr: stderrChunks.join(""), code: code ?? 0, killed });
 			});
 		});
 }

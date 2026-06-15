@@ -47,3 +47,54 @@ test("makeSpawnExec captures stdout and reports the child's pid on a clean exit"
 	assert.deepEqual(result, { stdout: "hello\n", stderr: "", code: 0, killed: false });
 	assert.deepEqual(onSpawnPids, [FAKE_PID]);
 });
+
+// The child and the timer are the external boundary, so a fake schedule RECORDS every
+// (run, ms) it is handed — letting the test fire the timeout and grace callbacks by hand
+// instead of waiting on a real clock — and the fake child records each kill signal but
+// never exits on its own, so the runner's SIGTERM→SIGKILL escalation is observable purely
+// through the injected deps.
+test("makeSpawnExec escalates from SIGTERM to SIGKILL and resolves killed when a child overruns its timeout", async () => {
+	const killSignals: (NodeJS.Signals | number | undefined)[] = [];
+	const child = Object.assign(new EventEmitter(), {
+		pid: FAKE_PID,
+		killed: false,
+		exitCode: null,
+		stdout: new EventEmitter(),
+		stderr: new EventEmitter(),
+		kill: (signal?: NodeJS.Signals | number) => {
+			killSignals.push(signal);
+			return true;
+		},
+	});
+
+	const scheduled: { run: () => void; ms: number }[] = [];
+	const deps: SpawnDeps = {
+		spawn: () => child,
+		schedule: (run, ms) => {
+			scheduled.push({ run, ms });
+			return () => {};
+		},
+	};
+
+	const fire = (ms: number) => {
+		const timer = scheduled.find((entry) => entry.ms === ms);
+		assert.ok(timer, `expected a callback scheduled at ms=${ms}`);
+		timer.run();
+	};
+
+	const run = makeSpawnExec(deps);
+	const resultPromise = run("pi", ["-p", "x"], { timeout: 5000, graceMs: 2000 });
+
+	// Overrunning the timeout signals SIGTERM at once and arms the grace timer.
+	fire(5000);
+	assert.deepEqual(killSignals, ["SIGTERM"]);
+
+	// The child is still alive when the grace window elapses, so SIGKILL follows.
+	fire(2000);
+	assert.deepEqual(killSignals, ["SIGTERM", "SIGKILL"]);
+
+	// The child finally exits after being killed; the result reports it was killed.
+	child.emit("exit", null);
+	const result = await resultPromise;
+	assert.equal(result.killed, true);
+});
