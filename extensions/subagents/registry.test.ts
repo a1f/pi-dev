@@ -204,3 +204,46 @@ test("kill cancels a queued run, firing its onKill hook, so a run killed while q
 	assert.equal(reg.start({ runId: "q1", startedAt: 5000 }), false);
 	assert.equal(reg.get("q1")?.status, "killed");
 });
+
+test("renderRows surfaces a run's malformed-line count and omits it when the count is zero", () => {
+	const reg = new RunRegistry();
+
+	const noisyState: RunState = {
+		toolCount: 1,
+		lastLine: "still working",
+		contextTokens: 500,
+		contextPct: 25,
+		done: true,
+		malformed: 2,
+	};
+	reg.register({ runId: "r1", task: "noisy parse", startedAt: 1000 });
+	reg.finish({ runId: "r1", status: "done", state: noisyState, finishedAt: 2000 });
+
+	const cleanState: RunState = {
+		toolCount: 2,
+		lastLine: "all good",
+		contextTokens: 1000,
+		contextPct: 50,
+		done: true,
+		malformed: 0,
+	};
+	reg.register({ runId: "r2", task: "clean parse", startedAt: 1000 });
+	reg.finish({ runId: "r2", status: "done", state: cleanState, finishedAt: 2000 });
+
+	reg.register({ runId: "r3", task: "waiting parse", startedAt: 1000, status: "queued" });
+
+	const out = renderRows(reg.list(), 4500);
+	const lines = out.split("\n");
+
+	const noisyLine = lines.find((line) => line.includes("noisy parse"));
+	assert.ok(noisyLine, "expected a row for the run with malformed output");
+	assert.ok(noisyLine.includes("2 malformed"));
+
+	const cleanLine = lines.find((line) => line.includes("clean parse"));
+	assert.ok(cleanLine, "expected a row for the run with no malformed output");
+	assert.ok(!cleanLine.includes("malformed"));
+
+	const queuedLine = lines.find((line) => line.includes("waiting parse"));
+	assert.ok(queuedLine, "expected a row for the queued run");
+	assert.ok(queuedLine.includes("▷"));
+});

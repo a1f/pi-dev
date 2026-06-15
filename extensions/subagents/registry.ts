@@ -95,7 +95,7 @@ export class RunRegistry {
 	}
 }
 
-/** Render one run as a single status line; omits the last-line cell when the run has produced none. */
+/** Render one run as a single status line; adds a malformed-line cell only when the count is nonzero, and omits the last-line cell when the run has produced none. */
 function renderRow(record: RunRecord, now: number): string {
 	const { state } = record;
 	const elapsedMs = (record.finishedAt ?? now) - record.startedAt;
@@ -107,6 +107,7 @@ function renderRow(record: RunRecord, now: number): string {
 		`${state.toolCount} tools`,
 		context,
 	];
+	if (state.malformed > 0) cells.push(`${state.malformed} malformed`);
 	if (state.lastLine !== null) cells.push(state.lastLine);
 	return cells.join(" · ");
 }
