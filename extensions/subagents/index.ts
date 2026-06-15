@@ -15,10 +15,11 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DASHBOARD_WIDGET, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DASHBOARD_REFRESH_MS, DASHBOARD_WIDGET, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { renderDashboard } from "./dashboard.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
 import { loadPersonas, type Persona, resolveDispatch, splitFirstToken } from "./personas.ts";
+import { createDashboardRefresher } from "./refresh.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
 import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
 import { sessionPathFor } from "./session.ts";
@@ -70,6 +71,10 @@ export default function (pi: ExtensionAPI): void {
 	// Live record of this session's dispatched runs, surfaced by the agent_status tool.
 	const registry = new RunRegistry();
 
+	// The most recent UI context seen by a dispatch, so the refresh timer can re-render between
+	// handler calls. Null until the first dispatch; a no-UI context leaves refresh a no-op.
+	let lastUiCtx: ExtensionContext | null = null;
+
 	// Push the live grid dashboard of every tracked run into the footer, or clear it when there is
 	// nothing to show. A no-op without a UI: the print/RPC contexts have no setWidget, so calling it
 	// would throw. The widget always lands under one key so each refresh replaces the prior footer.
@@ -82,6 +87,17 @@ export default function (pi: ExtensionAPI): void {
 		else ctx.ui.setWidget(DASHBOARD_WIDGET, undefined);
 	};
 
+	// One self-stopping timer per extension instance: it re-renders the dashboard on a cadence while
+	// any run is live (so a running child's elapsed time animates even though exec is non-streaming)
+	// and clears itself once every run has finished. poke() after each register/finish (re)starts it.
+	const refresher = createDashboardRefresher({
+		intervalMs: DASHBOARD_REFRESH_MS,
+		isActive: () => registry.list().some((run) => run.status === "running"),
+		onTick: () => {
+			if (lastUiCtx !== null) refresh(lastUiCtx);
+		},
+	});
+
 	// Track a run, dispatch the child (with its persona + guardrails), mark it finished, then
 	// best-effort record it as a parent-session audit entry. Shared by the /agent command and the
 	// agent_dispatch tool so tracking + logging + audit live in one place. The run is registered
@@ -92,14 +108,17 @@ export default function (pi: ExtensionAPI): void {
 	// break the dispatch.
 	const dispatch = async (opts: { task: string; cwd: string; persona: Persona | null; ctx: ExtensionContext; continueSession?: boolean }): Promise<DispatchResult> => {
 		const { task, cwd, persona, ctx, continueSession = false } = opts;
+		lastUiCtx = ctx;
 		const runId = defaultRunId();
 		const startedAt = Date.now();
 		// Wire kill to abort: registering onKill before the await keeps the in-flight run
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
 		registry.register({ runId, task, startedAt, persona: persona?.name ?? null, onKill: () => controller.abort() });
-		// Surface the run as a live card immediately, before the await blocks on the child.
+		// Surface the run as a live card immediately, before the await blocks on the child, and start
+		// the refresh timer so its elapsed time animates while the child runs.
 		refresh(ctx);
+		refresher.poke();
 		// A persona owns one rolling per-persona session file: --session selects it and is what
 		// drives resumption, so the first dispatch starts the conversation and a later dispatch
 		// continues it. A persona-less dispatch stays session-free; an unsafe persona name yields
@@ -136,8 +155,10 @@ export default function (pi: ExtensionAPI): void {
 			continueSession,
 		});
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
-		// Flip the card from running to done/error now the run has terminated.
+		// Flip the card from running to done/error now the run has terminated; poke lets the timer
+		// self-stop on its next tick once this was the last running run.
 		refresh(ctx);
+		refresher.poke();
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
