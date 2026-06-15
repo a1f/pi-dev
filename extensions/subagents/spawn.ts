@@ -6,9 +6,8 @@
 // boundary, so injecting SpawnDeps keeps the wiring unit-testable with a fake
 // child and fake timers — no real process, no real clock.
 //
-// This slice handles a clean exit and timeout-driven SIGTERM→SIGKILL
-// escalation; AbortSignal handling (the `signal` option) is a later slice
-// with its own test.
+// This wrapper handles a clean exit plus SIGTERM→SIGKILL escalation driven by
+// either an overrun timeout or an aborted AbortSignal (the `signal` option).
 
 import { spawn as nodeSpawn } from "node:child_process";
 
@@ -34,7 +33,7 @@ export interface ChildLike {
 	on(event: "error", listener: (error: Error) => void): this;
 }
 
-/** Per-run knobs; cwd, onSpawn, timeout and graceMs act this slice, signal is the stable surface the abort slice will consume. */
+/** Per-run knobs; cwd, onSpawn, timeout, graceMs and signal all act this slice. */
 export interface SpawnExecOptions {
 	signal?: AbortSignal;
 	timeout?: number;
@@ -75,24 +74,40 @@ export function makeSpawnExec(deps: SpawnDeps): SpawnExec {
 				stderrChunks.push(chunk.toString());
 			});
 
-			// A run that overruns its timeout is SIGTERMed and marked killed at once, then
-			// SIGKILLed if it is still alive when the grace window elapses.
+			// SIGTERM the child and mark it killed at once, then SIGKILL it if it is still
+			// alive when the grace window elapses; shared by the timeout and abort triggers.
+			const terminate = () => {
+				killed = true;
+				child.kill("SIGTERM");
+				cancelGrace = deps.schedule(() => {
+					child.kill("SIGKILL");
+				}, options?.graceMs ?? DEFAULT_GRACE_MS);
+			};
+
+			// A run that overruns its timeout escalates exactly as an abort does.
 			const timeoutMs = options?.timeout;
 			if (timeoutMs !== undefined && timeoutMs > 0) {
-				cancelTimeout = deps.schedule(() => {
-					killed = true;
-					child.kill("SIGTERM");
-					cancelGrace = deps.schedule(() => {
-						child.kill("SIGKILL");
-					}, options?.graceMs ?? DEFAULT_GRACE_MS);
-				}, timeoutMs);
+				cancelTimeout = deps.schedule(terminate, timeoutMs);
 			}
 
-			// Cancel any pending escalation timers on exit so a clean exit never triggers a
-			// late SIGKILL; killed reflects whether the timeout path fired.
+			// Aborting the run's signal (how agent_kill stops a live child) escalates at once
+			// if already aborted, otherwise when the abort fires.
+			const signal = options?.signal;
+			if (signal !== undefined) {
+				if (signal.aborted) {
+					terminate();
+				} else {
+					signal.addEventListener("abort", terminate, { once: true });
+				}
+			}
+
+			// Cancel any pending escalation timers and drop the abort listener on exit so a
+			// clean exit never triggers a late SIGKILL or leaks a listener; killed reflects
+			// whether an escalation fired.
 			child.on("exit", (code) => {
 				cancelTimeout();
 				cancelGrace();
+				signal?.removeEventListener("abort", terminate);
 				resolve({ stdout: stdoutChunks.join(""), stderr: stderrChunks.join(""), code: code ?? 0, killed });
 			});
 		});

@@ -98,3 +98,54 @@ test("makeSpawnExec escalates from SIGTERM to SIGKILL and resolves killed when a
 	const result = await resultPromise;
 	assert.equal(result.killed, true);
 });
+
+// Aborting the run's signal is how agent_kill stops a live child, so an abort mid-run must
+// drive the SAME SIGTERM-now, SIGKILL-after-grace escalation as a timeout — observed purely
+// through the fake child's recorded kills and the recorded grace callback. No timeout is set,
+// so the abort signal is the sole trigger, isolating it from the timeout path.
+test("makeSpawnExec escalates from SIGTERM to SIGKILL and resolves killed when its abort signal fires", async () => {
+	const killSignals: (NodeJS.Signals | number | undefined)[] = [];
+	const child = Object.assign(new EventEmitter(), {
+		pid: FAKE_PID,
+		killed: false,
+		exitCode: null,
+		stdout: new EventEmitter(),
+		stderr: new EventEmitter(),
+		kill: (signal?: NodeJS.Signals | number) => {
+			killSignals.push(signal);
+			return true;
+		},
+	});
+
+	const scheduled: { run: () => void; ms: number }[] = [];
+	const deps: SpawnDeps = {
+		spawn: () => child,
+		schedule: (run, ms) => {
+			scheduled.push({ run, ms });
+			return () => {};
+		},
+	};
+
+	const fire = (ms: number) => {
+		const timer = scheduled.find((entry) => entry.ms === ms);
+		assert.ok(timer, `expected a callback scheduled at ms=${ms}`);
+		timer.run();
+	};
+
+	const controller = new AbortController();
+	const run = makeSpawnExec(deps);
+	const resultPromise = run("pi", ["-p", "x"], { signal: controller.signal, graceMs: 2000 });
+
+	// Aborting mid-run signals SIGTERM at once and arms the grace timer.
+	controller.abort();
+	assert.deepEqual(killSignals, ["SIGTERM"]);
+
+	// The child is still alive when the grace window elapses, so SIGKILL follows.
+	fire(2000);
+	assert.deepEqual(killSignals, ["SIGTERM", "SIGKILL"]);
+
+	// The child finally exits after being killed; the result reports it was killed.
+	child.emit("exit", null);
+	const result = await resultPromise;
+	assert.equal(result.killed, true);
+});
