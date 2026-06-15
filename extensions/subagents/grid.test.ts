@@ -101,7 +101,7 @@ test("renderGrid fills the context bar proportionally and empties it when unknow
 
 // A compact ASCII theme keeps the layout goldens readable and exactly computable.
 const snapshotTheme: GridTheme = {
-	glyph: { running: "R", done: "D", error: "E", killed: "K", idle: "I" },
+	glyph: { running: "R", queued: "Q", done: "D", error: "E", killed: "K", idle: "I" },
 	barFilled: "#",
 	barEmpty: ".",
 	barWidth: 4,
@@ -155,7 +155,7 @@ test("renderGrid lays cards into three columns, leaving a one-card last row", ()
 
 test("renderGrid truncates a title and last line that overflow cardWidth with an ellipsis", () => {
 	const narrow: GridTheme = {
-		glyph: { running: "R", done: "D", error: "E", killed: "K", idle: "I" },
+		glyph: { running: "R", queued: "Q", done: "D", error: "E", killed: "K", idle: "I" },
 		barFilled: "#",
 		barEmpty: ".",
 		barWidth: 3,

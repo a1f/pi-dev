@@ -6,12 +6,13 @@
 
 import type { RunState } from "./runstate.ts";
 
-/** Lifecycle of a run: live, finished cleanly or with an error, or killed. */
-export type RunStatus = "running" | "done" | "error" | "killed";
+/** Lifecycle of a run: queued for a slot, live, finished cleanly or with an error, or killed. */
+export type RunStatus = "running" | "queued" | "done" | "error" | "killed";
 
 /** Single-glyph status marker shown at the head of each rendered row. */
 const STATUS_GLYPH: Record<RunStatus, string> = {
 	running: "▶",
+	queued: "▷",
 	done: "✓",
 	error: "✗",
 	killed: "⊘",
@@ -41,19 +42,29 @@ export class RunRegistry {
 	/** Per-run cancellation hooks, kept off the public record so callers can't fire them. */
 	readonly #onKill = new Map<string, () => void>();
 
-	/** Record a newly dispatched run as running, with an empty initial state. */
-	register(run: { runId: string; task: string; startedAt: number; persona?: string | null; onKill?: () => void }): void {
-		const { runId, task, startedAt, persona, onKill } = run;
+	/** Record a newly dispatched run with an empty initial state — running by default, or queued when it must wait for a slot. */
+	register(run: { runId: string; task: string; startedAt: number; persona?: string | null; status?: "running" | "queued"; onKill?: () => void }): void {
+		const { runId, task, startedAt, persona, status, onKill } = run;
 		this.#records.set(runId, {
 			runId,
 			task,
 			persona: persona ?? null,
-			status: "running",
+			status: status ?? "running",
 			startedAt,
 			finishedAt: null,
 			state: emptyRunState(),
 		});
 		if (onKill !== undefined) this.#onKill.set(runId, onKill);
+	}
+
+	/** Promote a queued run to running once its slot is acquired, restamping startedAt so elapsed measures run time not queue wait; an unknown or non-queued runId is a no-op returning false. */
+	start(update: { runId: string; startedAt: number }): boolean {
+		const { runId, startedAt } = update;
+		const record = this.#records.get(runId);
+		if (record === undefined || record.status !== "queued") return false;
+		record.status = "running";
+		record.startedAt = startedAt;
+		return true;
 	}
 
 	/** Mark a still-running run terminal with its final status, folded state, and end time; a missing or already-terminal runId is a no-op, so a killed run is never overwritten by a late completion. */

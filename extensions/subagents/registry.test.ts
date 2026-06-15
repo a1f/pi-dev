@@ -159,3 +159,25 @@ test("renderRows renders one line per run with its glyph, task, elapsed seconds,
 	assert.ok(doneLine.includes("12%"));
 	assert.ok(doneLine.includes("All set."));
 });
+
+test("start flips a queued run to running once, restamping its start time, and is a no-op otherwise", () => {
+	const reg = new RunRegistry();
+
+	reg.register({ runId: "q1", task: "scout repo", startedAt: 1000, status: "queued" });
+	assert.equal(reg.get("q1")?.status, "queued");
+	assert.equal(reg.get("q1")?.startedAt, 1000);
+
+	// Acquiring a slot starts the run: status becomes running and the start time is
+	// restamped so elapsed measures run time, not queue wait.
+	assert.equal(reg.start({ runId: "q1", startedAt: 5000 }), true);
+	assert.equal(reg.get("q1")?.status, "running");
+	assert.equal(reg.get("q1")?.startedAt, 5000);
+
+	// Starting an already-running run changes nothing.
+	assert.equal(reg.start({ runId: "q1", startedAt: 9000 }), false);
+	assert.equal(reg.get("q1")?.status, "running");
+	assert.equal(reg.get("q1")?.startedAt, 5000);
+
+	// Starting an unknown run changes nothing.
+	assert.equal(reg.start({ runId: "nope", startedAt: 1 }), false);
+});

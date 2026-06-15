@@ -43,9 +43,9 @@ export interface GridTheme {
 	cardWidth: number;
 }
 
-/** Defaults consistent with registry.ts row glyphs (▶ ✓ ✗ ⊘); idle gets its own marker. */
+/** Defaults consistent with registry.ts row glyphs (▶ ▷ ✓ ✗ ⊘); idle gets its own marker. */
 export const DEFAULT_GRID_THEME: GridTheme = {
-	glyph: { running: "▶", done: "✓", error: "✗", killed: "⊘", idle: "○" },
+	glyph: { running: "▶", queued: "▷", done: "✓", error: "✗", killed: "⊘", idle: "○" },
 	barFilled: "█",
 	barEmpty: "░",
 	barWidth: 10,
