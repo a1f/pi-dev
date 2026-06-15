@@ -22,8 +22,10 @@ export function columnsForWidth(width: number, theme: GridTheme = DEFAULT_GRID_T
 
 /**
  * Build the footer's cards: one per persona (titled by persona name, showing its latest run or
- * an idle placeholder), followed by one card per persona-less run. Every known persona is shown
- * up front even when it has no run, so the dashboard reflects the roster, not just live activity.
+ * an idle placeholder), followed by one card for every run not already represented by a persona
+ * card — both persona-less runs and runs tagged with a persona absent from the roster, so a live
+ * run is never dropped. Every known persona is shown up front even when it has no run, so the
+ * dashboard reflects the roster, not just live activity.
  */
 export function buildDashboardCards(opts: {
 	records: readonly RunRecord[];
@@ -31,11 +33,14 @@ export function buildDashboardCards(opts: {
 	now: number;
 }): GridCard[] {
 	const { records, personas, now } = opts;
+	const rosterNames = new Set(personas.map((persona) => persona.name));
 	const personaCards = personas.map((persona) => {
 		const latest = records.findLast((record) => record.persona === persona.name);
 		return latest === undefined ? idleCard(persona) : { ...cardFromRecord(latest, now), title: persona.name };
 	});
-	const looseCards = records.filter((record) => record.persona === null).map((record) => cardFromRecord(record, now));
+	const looseCards = records
+		.filter((record) => record.persona === null || !rosterNames.has(record.persona))
+		.map((record) => cardFromRecord(record, now));
 	return [...personaCards, ...looseCards];
 }
 

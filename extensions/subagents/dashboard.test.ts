@@ -85,6 +85,40 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 	]);
 });
 
+test("buildDashboardCards keeps a card for a run whose persona is not in the roster", () => {
+	// A run can be tagged with a persona the freshly-loaded roster no longer includes (its
+	// .pi/agents/*.md was deleted or went malformed mid-run). That run matches no persona card
+	// and is not persona-less, so it must still get its own card — a live run must never vanish.
+	const scout: Persona = {
+		name: "scout",
+		description: "explores the codebase",
+		tools: null,
+		model: null,
+		systemPrompt: "",
+		source: null,
+	};
+	const ghostRun: RunRecord = {
+		runId: "ghost-1",
+		task: "do the thing",
+		persona: "ghost",
+		status: "running",
+		startedAt: 1_000,
+		finishedAt: null,
+		state: { toolCount: 2, lastLine: "working", contextTokens: null, contextPct: 17, done: false, malformed: 0 },
+	};
+
+	const now = 5_000;
+	const cards = buildDashboardCards({ records: [ghostRun], personas: [scout], now });
+
+	// The ghost run gets its own card, titled by its task and carrying its live status...
+	assert.ok(
+		cards.some((card) => card.title === "do the thing" && card.status === "running"),
+		`expected the ghost run's card to survive, got ${JSON.stringify(cards)}`,
+	);
+	// ...in addition to scout's idle card, so no run is dropped: scout idle + the ghost run.
+	assert.equal(cards.length, 2, `expected scout's idle card plus the ghost run's card, got ${JSON.stringify(cards)}`);
+});
+
 test("renderDashboard packs cards into width-fitted rows and yields no lines when empty", () => {
 	// A small ascii theme makes the column math predictable: cardWidth 10 + the 2-column gutter
 	// is a 12-column stride, so a width of 24 fits two cards across and a width of 10 fits one.
