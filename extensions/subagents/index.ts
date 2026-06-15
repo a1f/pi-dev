@@ -2,11 +2,12 @@
 //
 // Thin pi adapter over the tested core (runner.ts → argv.ts/events.ts). Both the
 // `/agent` command (operator) and the `agent_dispatch` tool (the main agent) run a
-// read-only child via pi.exec and inject its answer back into the conversation as a
-// follow-up that triggers the parent's next turn. A persona dispatch also persists its
-// conversation to a per-persona session file, so the `/agent-continue` command and
-// `agent_continue` tool can resume that persona in a fresh child for a follow-up turn.
+// read-only child via an injectable exec (the in-repo spawn wrapper by default) and inject
+// its answer back into the conversation as a follow-up that triggers the parent's next turn.
+// A persona dispatch also persists its conversation to a per-persona session file, so the
+// `/agent-continue` command and `agent_continue` tool can resume that persona in a fresh child.
 
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,17 +16,83 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DEFAULT_TIMEOUT_MS, INFLIGHT_FILE, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
+import { type InflightRecord, parseInflight, reapOrphans, serializeInflight } from "./orphans.ts";
 import { loadPersonas, type Persona, resolveDispatch, splitFirstToken } from "./personas.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
-import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
+import { defaultRunId, formatReply, runAgent, type DispatchResult, type LogWriter } from "./runner.ts";
 import { sessionPathFor } from "./session.ts";
+import { defaultSpawnDeps, makeSpawnExec, type SpawnExec } from "./spawn.ts";
 
 // The guardrails extension is a sibling dir (extensions/guardrails), resolved from this file's
 // location so it is correct regardless of the parent session's cwd. Every spawned child loads it
 // explicitly: `--no-extensions` only disables discovery, so the safety net must be passed by path.
 const GUARDRAILS_EXTENSION = join(dirname(fileURLToPath(import.meta.url)), "..", "guardrails");
+
+/** Injectable runner deps for the subagent extension, kept extensible as later slices add more optional deps. */
+export interface SubagentDeps {
+	/** The child runner, injected so tests fake the child and later slices can wrap it to capture the child's pid. */
+	exec?: SpawnExec;
+	/** Liveness probe injected so the OS effect is fakeable: true only when a recorded child is still running AND still our subagent, so a reused pid is never reaped. */
+	processAlive?: (record: InflightRecord) => boolean;
+	/** Force-kill injected so the OS effect is fakeable: terminates a reaped orphan by pid. */
+	killProcess?: (pid: number) => void;
+}
+
+// The pidfile's imperative shell: record/remove are synchronous so the pid persists before any
+// crash window and is gone the instant a run ends; the JSONL format itself lives in orphans.ts.
+
+/** Persist a live child's pid at spawn so a crashed session's orphans stay reapable; synchronous and best-effort so the pid lands before any crash window and tracking never breaks a dispatch. */
+function recordInflight(cwd: string, record: InflightRecord): void {
+	const path = join(cwd, INFLIGHT_FILE);
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		appendFileSync(path, serializeInflight([record]), "utf8");
+	} catch {
+		// Swallow: pidfile tracking is best-effort and must never break a dispatch.
+	}
+}
+
+/**
+ * Drop a finished run from the pidfile so it is never mistaken for an orphan, treating a missing file as a no-op so completion never throws.
+ * Note: this read-modify-write is not concurrency-safe; concurrent completions can reinstate a stale record, which is acceptable until the concurrency cap + FIFO queue land in PR 7.2 (a dead stale record is harmless — the next startup reap drops it since the process is gone).
+ */
+function removeInflight(cwd: string, runId: string): void {
+	const path = join(cwd, INFLIGHT_FILE);
+	try {
+		const remaining = parseInflight(readFileSync(path, "utf8")).filter((record) => record.runId !== runId);
+		writeFileSync(path, serializeInflight(remaining), "utf8");
+	} catch {
+		// Swallow: a missing pidfile (or write failure) on remove is a no-op.
+	}
+}
+
+/** Default PID-reuse-safe liveness probe: a recorded child counts as a live orphan only when its pid is running AND its /proc cmdline still identifies our one-shot pi child, so a process that reused a dead child's pid is never killed. */
+const defaultProcessAlive = (record: InflightRecord): boolean => {
+	try {
+		process.kill(record.pid, 0);
+	} catch {
+		// Signal 0 only probes; a throw means no such process (or no permission), so not a live orphan.
+		return false;
+	}
+	try {
+		const cmdline = readFileSync(`/proc/${record.pid}/cmdline`, "utf8");
+		return cmdline.includes("--mode") && cmdline.includes("json");
+	} catch {
+		// No /proc (non-Linux) or unreadable: identity unconfirmed, so never kill it.
+		return false;
+	}
+};
+
+/** Default force-kill for a reaped orphan, swallowing the error when the process is already gone so reaping a stale record never throws. */
+const defaultKillProcess = (pid: number): void => {
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		// Already gone: nothing to kill.
+	}
+};
 
 /** Whether a path exists and is accessible — the continue precondition that a prior session file is present. */
 async function pathExists(path: string): Promise<boolean> {
@@ -56,8 +123,10 @@ async function resolveContinueTarget(opts: { name: string; personas: readonly Pe
 	return { ok: true, persona };
 }
 
-export default function (pi: ExtensionAPI): void {
-	const exec: ExecLike = (command, args, options) => pi.exec(command, args, options);
+export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
+	const exec: SpawnExec = deps.exec ?? makeSpawnExec(defaultSpawnDeps);
+	const processAlive = deps.processAlive ?? defaultProcessAlive;
+	const killProcess = deps.killProcess ?? defaultKillProcess;
 
 	// The real log writer: the only fs in the dispatch path. Injected into runAgent,
 	// which keeps logging best-effort and swallows any failure here.
@@ -85,6 +154,10 @@ export default function (pi: ExtensionAPI): void {
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
 		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
+		// Wrap the injected exec to record this child's pid in the pidfile the instant it spawns:
+		// runAgent only forwards {timeout,signal,cwd}, so the onSpawn hook lives in this wrapper.
+		const trackedExec: SpawnExec = (command, args, options) =>
+			exec(command, args, { ...options, onSpawn: (pid) => recordInflight(cwd, { runId, pid, startedAt }) });
 		// A persona owns one rolling per-persona session file: --session selects it and is what
 		// drives resumption, so the first dispatch starts the conversation and a later dispatch
 		// continues it. A persona-less dispatch stays session-free; an unsafe persona name yields
@@ -101,7 +174,7 @@ export default function (pi: ExtensionAPI): void {
 				// Swallow: a failed pre-create must never derail the dispatch; pi may still create it.
 			}
 		}
-		const result = await runAgent(task, exec, {
+		const result = await runAgent(task, trackedExec, {
 			timeoutMs: DEFAULT_TIMEOUT_MS,
 			cwd,
 			writeLog,
@@ -121,6 +194,8 @@ export default function (pi: ExtensionAPI): void {
 			continueSession,
 		});
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
+		// The child is no longer in flight, so drop its pidfile record before the (best-effort) audit.
+		removeInflight(cwd, runId);
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
@@ -141,6 +216,29 @@ export default function (pi: ExtensionAPI): void {
 		}
 		return result;
 	};
+
+	// Reap children a crashed prior session left in flight: on session start, force-kill any recorded
+	// child whose process is still alive (a dead record needs no kill) and clear the pidfile, since
+	// none of those runs belong to this new session and session_start fires before any new dispatch.
+	// Best-effort and fully swallowed — a missing/unreadable pidfile is nothing to do, and reaping
+	// must never break session start.
+	pi.on("session_start", async (event, ctx) => {
+		// "reload"/"new"/"resume"/"fork" fire within a live session whose own in-flight children are in
+		// the pidfile — reaping then would kill them; only a fresh "startup" implies the prior recorded
+		// children are orphans of a dead process.
+		if (event.reason !== "startup") return;
+		try {
+			const path = join(ctx.cwd, INFLIGHT_FILE);
+			const records = parseInflight(readFileSync(path, "utf8"));
+			const reaped = reapOrphans(records, { isAlive: processAlive, kill: killProcess });
+			writeFileSync(path, serializeInflight([]), "utf8");
+			if (reaped.length > 0) {
+				ctx.ui.notify(`[${LABEL}] reaped ${reaped.length} orphaned subagent(s)`, "info");
+			}
+		} catch {
+			// Swallow: a missing/unreadable pidfile means nothing to reap, and reaping must never break session start.
+		}
+	});
 
 	pi.registerCommand(COMMAND, {
 		description: "Dispatch a headless read-only subagent to perform <task>; its answer is injected as a follow-up.",

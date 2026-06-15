@@ -34,6 +34,8 @@ export interface DispatchResult {
 	finalText: string | null;
 	malformed: number;
 	code: number;
+	/** Marks a run terminated by its own timeout — distinct from a normal failure or an operator kill — so the reply can name a timeout. */
+	timedOut: boolean;
 	/** State folded from the child's event stream, so the registry can show the run's progress. */
 	state: RunState;
 	/** The run's id and log path when a child actually spawned; null on early-return paths. */
@@ -55,6 +57,9 @@ export function formatReply(task: string, result: Omit<DispatchResult, "state">)
 	}
 	if (result.error !== undefined) {
 		return `Subagent for "${task}" could not run: ${result.error}`;
+	}
+	if (result.timedOut) {
+		return `Subagent for "${task}" timed out before it finished.`;
 	}
 	return `Subagent for "${task}" did not complete (exit ${result.code}).`;
 }
@@ -107,7 +112,7 @@ export async function runAgent(task: string, exec: ExecLike, options?: RunAgentO
 	// reason, never spawn a child or throw. Empty and argv-rejected tasks short-circuit
 	// before any run id or log exists, so they report null run/log and zero duration.
 	if (task.trim() === "") {
-		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, state: EMPTY_RUN_STATE, error: "task is required" };
+		return { ok: false, finalText: null, malformed: 0, code: 1, timedOut: false, runId: null, logPath: null, durationMs: 0, state: EMPTY_RUN_STATE, error: "task is required" };
 	}
 	// Split dispatch controls from the spawn knobs; `spawn` is exactly SpawnArgvOptions minus
 	// `task`, so it forwards into buildSpawnArgv as-is without re-listing each field.
@@ -117,13 +122,16 @@ export async function runAgent(task: string, exec: ExecLike, options?: RunAgentO
 		argv = buildSpawnArgv({ task, ...spawn });
 	} catch (error) {
 		const reason: string = error instanceof Error ? error.message : String(error);
-		return { ok: false, finalText: null, malformed: 0, code: 1, runId: null, logPath: null, durationMs: 0, state: EMPTY_RUN_STATE, error: reason };
+		return { ok: false, finalText: null, malformed: 0, code: 1, timedOut: false, runId: null, logPath: null, durationMs: 0, state: EMPTY_RUN_STATE, error: reason };
 	}
 	const runId = requestedRunId ?? defaultRunId();
 	const logPath = join(cwd ?? ".", RUNS_DIR, runLogName(runId));
 	const startedAt = Date.now();
 	const result = await exec("pi", argv, { timeout: timeoutMs, cwd, signal });
 	const durationMs = Date.now() - startedAt;
+	// A killed child is a timeout only when the operator did not abort it: agent_kill aborts the
+	// signal first, so an un-aborted signal on a killed child means the run hit its own timeout.
+	const timedOut = result.killed && !(signal?.aborted);
 	const parsed = parseEventStream(result.stdout);
 	const state = reduceRunStateFromString(result.stdout);
 	// Best-effort logging: a write failure must never derail the dispatch result, and an
@@ -144,5 +152,5 @@ export async function runAgent(task: string, exec: ExecLike, options?: RunAgentO
 			// Swallow: the run already happened; its outcome stands regardless of logging.
 		}
 	}
-	return { ok: parsed.done && result.code === 0, finalText: parsed.finalText, malformed: parsed.malformed, code: result.code, runId, logPath, durationMs, state };
+	return { ok: parsed.done && result.code === 0, finalText: parsed.finalText, malformed: parsed.malformed, code: result.code, timedOut, runId, logPath, durationMs, state };
 }
