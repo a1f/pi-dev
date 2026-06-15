@@ -99,6 +99,64 @@ test("makeSpawnExec escalates from SIGTERM to SIGKILL and resolves killed when a
 	assert.equal(result.killed, true);
 });
 
+// When a real node ChildProcess fails to start (ENOENT/EPERM), the OS fires an "error"
+// event and NEVER fires "exit". With no "error" listener, node's EventEmitter re-throws
+// the error as an uncaught exception (crashing the parent pi session) and the SpawnExec
+// promise hangs forever because resolve() is never called. This test pins the missing
+// behavior: the promise must settle to a nonzero failure result on "error", not crash or hang.
+test("makeSpawnExec resolves with a nonzero failure result when the child emits an error event instead of exiting", async () => {
+	const child = Object.assign(new EventEmitter(), {
+		pid: FAKE_PID,
+		killed: false,
+		exitCode: null,
+		stdout: new EventEmitter(),
+		stderr: new EventEmitter(),
+		kill: (): boolean => true,
+	});
+
+	const deps: SpawnDeps = {
+		spawn: () => child,
+		// Escalation timers never arm: the error fires before any timeout can be set up.
+		schedule: () => () => {},
+	};
+
+	const run = makeSpawnExec(deps);
+	const resultPromise = run("pi", ["-p", "x"]);
+
+	// A standard EventEmitter throws "error" events that have no listener, mirroring the
+	// real node ChildProcess runtime. In RED, makeSpawnExec registers no "error" handler,
+	// so the emit throws; we catch it so the test body reaches the assertion rather than
+	// crashing with the raw re-throw. In GREEN, makeSpawnExec registers a handler, the
+	// emit calls it, and no throw occurs.
+	const spawnError = new Error("spawn pi ENOENT");
+	try {
+		child.emit("error", spawnError);
+	} catch {
+		// In RED: the throw here proves makeSpawnExec has no "error" listener.
+	}
+
+	// Race the SpawnExec promise against a 100 ms sentinel so the test stays deterministic
+	// and yields a clean assertion failure rather than hanging when the promise never settles
+	// (because "error" fired and no handler ever called resolve()).
+	type ExecResult = Awaited<ReturnType<typeof run>>;
+	let resolved: ExecResult | undefined;
+	await Promise.race([
+		resultPromise.then((r) => {
+			resolved = r;
+		}),
+		new Promise<void>((settle) => {
+			setTimeout(settle, 100);
+		}),
+	]);
+
+	// In RED: the promise never settled (no "error" handler → resolve was never called),
+	// so resolved is still undefined and this assertion fires as the clean RED failure.
+	assert.ok(resolved !== undefined, "makeSpawnExec must resolve the promise when the child emits 'error'");
+	assert.notEqual(resolved.code, 0, "spawn error must produce a nonzero exit code");
+	assert.equal(resolved.killed, false, "a spawn failure is not a process kill");
+	assert.ok(resolved.stderr.includes("spawn pi ENOENT"), "spawn error message must appear in stderr");
+});
+
 // Aborting the run's signal is how agent_kill stops a live child, so an abort mid-run must
 // drive the SAME SIGTERM-now, SIGKILL-after-grace escalation as a timeout — observed purely
 // through the fake child's recorded kills and the recorded grace callback. No timeout is set,

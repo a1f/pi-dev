@@ -52,7 +52,10 @@ function recordInflight(cwd: string, record: InflightRecord): void {
 	}
 }
 
-/** Drop a finished run from the pidfile so it is never mistaken for an orphan, treating a missing file as a no-op so completion never throws. */
+/**
+ * Drop a finished run from the pidfile so it is never mistaken for an orphan, treating a missing file as a no-op so completion never throws.
+ * Note: this read-modify-write is not concurrency-safe; concurrent completions can reinstate a stale record, which is acceptable until the concurrency cap + FIFO queue land in PR 7.2 (a dead stale record is harmless — the next startup reap drops it since the process is gone).
+ */
 function removeInflight(cwd: string, runId: string): void {
 	const path = join(cwd, INFLIGHT_FILE);
 	try {

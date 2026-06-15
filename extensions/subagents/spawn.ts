@@ -76,7 +76,12 @@ export function makeSpawnExec(deps: SpawnDeps): SpawnExec {
 
 			// SIGTERM the child and mark it killed at once, then SIGKILL it if it is still
 			// alive when the grace window elapses; shared by the timeout and abort triggers.
+			// The idempotency guard prevents a double SIGTERM + stray grace timer when both
+			// a timeout and an abort signal fire for the same run.
+			let terminating = false;
 			const terminate = () => {
+				if (terminating) return;
+				terminating = true;
 				killed = true;
 				child.kill("SIGTERM");
 				cancelGrace = deps.schedule(() => {
@@ -103,12 +108,28 @@ export function makeSpawnExec(deps: SpawnDeps): SpawnExec {
 
 			// Cancel any pending escalation timers and drop the abort listener on exit so a
 			// clean exit never triggers a late SIGKILL or leaks a listener; killed reflects
-			// whether an escalation fired.
+			// whether an escalation fired. The settled guard prevents a double-resolve when a
+			// spawn failure emits "error" followed by a late "close" event.
+			let settled = false;
 			child.on("exit", (code) => {
+				if (settled) return;
+				settled = true;
 				cancelTimeout();
 				cancelGrace();
 				signal?.removeEventListener("abort", terminate);
 				resolve({ stdout: stdoutChunks.join(""), stderr: stderrChunks.join(""), code: code ?? 0, killed });
+			});
+
+			// A spawn failure (ENOENT/EPERM) emits "error" and never emits "exit". Without
+			// this handler node re-throws the error as an uncaught exception and the promise
+			// leaks; with it, we resolve to a nonzero failure result so the caller can handle it.
+			child.on("error", (err) => {
+				if (settled) return;
+				settled = true;
+				cancelTimeout();
+				cancelGrace();
+				signal?.removeEventListener("abort", terminate);
+				resolve({ stdout: stdoutChunks.join(""), stderr: stderrChunks.join("") + err.message, code: 1, killed: false });
 			});
 		});
 }

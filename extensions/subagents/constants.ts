@@ -23,7 +23,7 @@ export const AUDIT_TYPE = "subagent_run";
 export const TAIL_LINES = 20;
 
 /**
- * Default per-dispatch wall-clock cap (ms) handed to pi.exec, which SIGTERM→SIGKILLs
+ * Default per-dispatch wall-clock cap (ms) passed to the spawn wrapper, which SIGTERM→SIGKILLs
  * a child that overruns. This is the hung-child guard; timeout escalation and orphan
  * cleanup now ship in slice 7.1, while a concurrency cap and FIFO queue remain a later
  * PR (7.2).
