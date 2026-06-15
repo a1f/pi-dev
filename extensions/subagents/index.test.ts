@@ -1,21 +1,23 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionHandler, type SessionStartEvent } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, LOG_COMMAND, RUNS_DIR, SESSIONS_DIR, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, INFLIGHT_FILE, LOG_COMMAND, RUNS_DIR, SESSIONS_DIR, TOOL } from "./constants.ts";
 import subagents from "./index.ts";
 import { type SubagentRunAudit } from "./log.ts";
+import { type InflightRecord, parseInflight, serializeInflight } from "./orphans.ts";
 import { type ExecLike, type ExecResultLike } from "./runner.ts";
+import { type SpawnExec } from "./spawn.ts";
 
 // Drive the real extension default export against a fake pi so the inject-link
-// is exercised end to end: the command handler must run runAgent over pi.exec,
-// then deliver the formatted answer back through pi.sendUserMessage. The exec
+// is exercised end to end: the command handler must run runAgent over the injected
+// exec, then deliver the formatted answer back through pi.sendUserMessage. The exec
 // fake returns the shared happy-path fixture instead of spawning a real child.
 const here = dirname(fileURLToPath(import.meta.url));
 const happyStream = readFileSync(join(here, "fixtures", "summarize-readme.jsonl"), "utf8");
@@ -25,13 +27,16 @@ type CommandHandler = Parameters<ExtensionAPI["registerCommand"]>[1]["handler"];
 type ToolDef = Parameters<ExtensionAPI["registerTool"]>[0];
 type CommandCtx = Parameters<CommandHandler>[1];
 type ToolCtx = Parameters<ToolDef["execute"]>[4];
+/** The session_start handler the extension registers, and the ctx it receives — captured by the fake pi's on(). */
+type SessionStartHandler = ExtensionHandler<SessionStartEvent>;
+type SessionStartCtx = Parameters<SessionStartHandler>[1];
 
-/** The options pi.exec received, including the AbortSignal a kill aborts the child with. */
+/** The options the injected exec received, including the AbortSignal a kill aborts the child with. */
 type ExecOptions = NonNullable<Parameters<ExecLike>[2]>;
 
 interface ExecCall {
 	command: string;
-	args: string[];
+	args: readonly string[];
 	options: ExecOptions | undefined;
 }
 interface SentMessage {
@@ -47,9 +52,13 @@ interface AuditCall {
 interface FakePi {
 	commandHandler: CommandHandler | undefined;
 	logHandler: CommandHandler | undefined;
+	/** The session_start handler captured from pi.on, invoked by the orphan-reaping test. */
+	sessionStartHandler: SessionStartHandler | undefined;
 	continueHandler: CommandHandler | undefined;
 	tool: ToolDef | undefined;
 	tools: ToolDef[];
+	/** The injected child runner passed to subagents as deps.exec; records into execCalls. */
+	exec: SpawnExec;
 	execCalls: ExecCall[];
 	sent: SentMessage[];
 	audits: AuditCall[];
@@ -59,19 +68,34 @@ interface FakePi {
 }
 
 function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
+	const execCalls: ExecCall[] = [];
+	// The injected child runner: it records each call into execCalls, then — so a test can
+	// supply its own exec (e.g. a deferred) to observe a run mid-flight — replays that
+	// deferred when given one, else resolves immediately with the shared happy-path fixture.
+	const exec: SpawnExec = (command, args, options) => {
+		execCalls.push({ command, args, options });
+		return respondExec !== undefined ? respondExec() : Promise.resolve({ stdout: happyStream, stderr: "", code: 0, killed: false });
+	};
 	const fake: FakePi = {
 		commandHandler: undefined,
 		logHandler: undefined,
+		sessionStartHandler: undefined,
 		continueHandler: undefined,
 		tool: undefined,
 		tools: [],
-		execCalls: [],
+		exec,
+		execCalls,
 		sent: [],
 		audits: [],
 		appendThrows: false,
 		pi: undefined as unknown as ExtensionAPI,
 	};
 	const pi = {
+		on(event: string, handler: SessionStartHandler): void {
+			// Capture only the session_start handler the orphan-reaping test invokes; other
+			// events are accepted and ignored so registering them never throws.
+			if (event === "session_start") fake.sessionStartHandler = handler;
+		},
 		registerCommand(name: string, options: { handler: CommandHandler }): void {
 			if (name === COMMAND) fake.commandHandler = options.handler;
 			else if (name === LOG_COMMAND) fake.logHandler = options.handler;
@@ -82,12 +106,6 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 			// Keep `tool` pinned to the dispatch tool by name so adding sibling tools
 			// (e.g. agent_status) never shifts what the agent_dispatch tests reach.
 			if (tool.name === TOOL) fake.tool = tool;
-		},
-		exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResultLike> {
-			fake.execCalls.push({ command, args, options });
-			// A test may inject its own exec (e.g. a deferred) to observe a run mid-flight;
-			// the default resolves immediately with the shared happy-path fixture.
-			return respondExec !== undefined ? respondExec() : Promise.resolve({ stdout: happyStream, stderr: "", code: 0, killed: false });
 		},
 		sendUserMessage(content: string | unknown[], options?: { deliverAs?: string }): void {
 			fake.sent.push({ content, options });
@@ -104,7 +122,7 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 const tempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), "subagents-"));
 
 /** The argument following the first occurrence of `flag` in a spawn argv, or undefined. */
-const flagValue = (args: string[], flag: string): string | undefined => {
+const flagValue = (args: readonly string[], flag: string): string | undefined => {
 	const i = args.indexOf(flag);
 	return i === -1 ? undefined : args[i + 1];
 };
@@ -129,7 +147,7 @@ const toolCtx = fakeCtx as unknown as ToolCtx;
 
 test("command handler injects the subagent answer back as a follow-up", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	await fake.commandHandler("summarize the README", commandCtx);
@@ -145,7 +163,7 @@ test("command handler injects the subagent answer back as a follow-up", async ()
 
 test("a named persona applies its tools and system prompt, and the child still loads guardrails", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -170,7 +188,7 @@ test("a persona /agent dispatch persists to its per-persona session file, fresh 
 	// A persona dispatch passes --session <cwd>/.pi/sessions/<name>.jsonl so a later /agent-continue
 	// can resume it; the first run is fresh, so it must NOT carry --continue.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -191,7 +209,7 @@ test("a persona /agent dispatch creates the per-persona sessions directory befor
 	// <cwd>/.pi/sessions absent and the first persist would ENOENT; the extension creates it
 	// defensively (best-effort, mirroring the runs dir) so resumption never silently breaks.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -205,7 +223,7 @@ test("a persona /agent dispatch creates the per-persona sessions directory befor
 
 test("a plain dispatch (no persona) still loads guardrails and runs with the default read-only tools", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd(); // no personas: the whole arg string is the task
@@ -225,7 +243,7 @@ test("a persona with no body dispatches without a --system-prompt flag (the chil
 	// that empty string would emit `--system-prompt ""`, replacing the child's default prompt
 	// with nothing; an empty body must instead fall back to the default like tools/model do.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -242,7 +260,7 @@ test("a persona with no body dispatches without a --system-prompt flag (the chil
 test("the agent_dispatch tool spawns a child that loads the guardrails extension", async () => {
 	// The tool routes through the shared dispatch, so its child must carry guardrails too.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
 
 	await fake.tool.execute("id", { task: "summarize the README" }, undefined, undefined, toolCtx);
@@ -255,7 +273,7 @@ test("the agent_dispatch tool spawns a child that loads the guardrails extension
 
 test("command handler handles an invalid task without throwing or spawning", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	await assert.doesNotReject(fake.commandHandler("@.env", commandCtx));
@@ -268,7 +286,7 @@ test("command handler handles an invalid task without throwing or spawning", asy
 
 test("a dispatch records a parent-session audit entry capturing the run's outcome", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	// A real temp cwd so the real writeLog has somewhere to land; we assert on the audit.
@@ -294,7 +312,7 @@ test("a dispatch still delivers the answer when audit persistence throws", async
 	// dispatch — the subagent's answer must still reach the parent conversation.
 	const fake = makeFakePi();
 	fake.appendThrows = true;
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -309,7 +327,7 @@ test("a dispatch still delivers the answer when audit persistence throws", async
 
 test("the agent_dispatch tool returns the subagent answer as its text content", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
 
 	const result = await fake.tool.execute("id", { task: "summarize the README" }, undefined, undefined, toolCtx);
@@ -331,7 +349,7 @@ test("the /agent handler surfaces a warning for a malformed persona file and sti
 	// loadPersonas skips a malformed file but reports it in `warnings`; the handler must
 	// surface that to the operator (not silently drop it) and still run the requested task.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -349,7 +367,7 @@ test("the /agent handler surfaces a warning for a malformed persona file and sti
 
 test("/agent-log notifies the rendered tail of the most recent run log", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.logHandler, "the extension must register the agent-log command");
 
 	const dir = await tempCwd();
@@ -371,7 +389,7 @@ test("/agent-log notifies the rendered tail of the most recent run log", async (
 
 test("/agent-log reports no runs when the runs dir is absent, without throwing", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.logHandler, "the extension must register the agent-log command");
 
 	const dir = await tempCwd(); // no .pi/runs/ inside it
@@ -386,7 +404,7 @@ test("/agent-log warns once when the most recent run log cannot be read", async 
 	// A directory whose name looks like a log file is listed by readdir yet rejects
 	// readFile (EISDIR). The handler must surface a single warning and never throw.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.logHandler, "the extension must register the agent-log command");
 
 	const dir = await tempCwd();
@@ -436,7 +454,7 @@ test("agent_status reports an in-flight run as running and a completed run as do
 		settleExec = resolve;
 	});
 	const fake = makeFakePi(() => pendingExec);
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const statusTool = fake.tools.find((tool) => tool.name === "agent_status");
@@ -473,7 +491,7 @@ test("agent_kill aborts the in-flight child and the run stays killed after a lat
 		settleExec = resolve;
 	});
 	const fake = makeFakePi(() => pendingExec);
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const statusTool = fake.tools.find((tool) => tool.name === "agent_status");
@@ -512,12 +530,110 @@ test("agent_kill aborts the in-flight child and the run stays killed after a lat
 	assert.equal(finalRun.status, "killed", "a late completion must not overwrite a killed run");
 });
 
+test("a dispatch records its child's pid in the in-flight pidfile while running and removes it on completion", async () => {
+	// Orphan cleanup needs each live child persisted to a pidfile so a later session can reap
+	// children a dead session left behind. Hold the child's exec open with a deferred so the run is
+	// observably mid-flight, and fire onSpawn with a known pid the way the real spawn wrapper does;
+	// the shared fake exec never calls onSpawn, so this test injects its own.
+	const childPid = 4242;
+	let settleExec!: (result: ExecResultLike) => void;
+	const pendingExec = new Promise<ExecResultLike>((resolve) => {
+		settleExec = resolve;
+	});
+	const exec: SpawnExec = (_command, _args, options) => {
+		options?.onSpawn?.(childPid);
+		return pendingExec;
+	};
+	const fake = makeFakePi();
+	subagents(fake.pi, { exec });
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+	const inflightPath = join(dir, INFLIGHT_FILE);
+	// Read the pidfile, treating an absent file as no records, so each lifecycle check fails on a
+	// missing record rather than on an ENOENT throw.
+	const readInflight = () => parseInflight(existsSync(inflightPath) ? readFileSync(inflightPath, "utf8") : "");
+
+	// Start the dispatch but leave exec pending: the adapter records the pid synchronously at spawn,
+	// so the pidfile already names the running child before we let the run finish.
+	const dispatched = fake.commandHandler("scout repo", ctx);
+
+	const running = readInflight().find((record) => record.pid === childPid);
+	assert.ok(running, "the running child's pid must be recorded in the in-flight pidfile");
+	assert.ok(running.runId.length > 0, "the in-flight record must carry a non-empty run id");
+
+	// Let the child exit cleanly, then let the dispatch settle.
+	settleExec({ stdout: happyStream, stderr: "", code: 0, killed: false });
+	await dispatched;
+
+	assert.ok(!readInflight().some((record) => record.pid === childPid), "a completed run's pid must be removed from the in-flight pidfile");
+});
+
+test("on startup, session_start force-kills only the live orphan and clears the pidfile", async () => {
+	// A session that crashed mid-run can leave its in-flight children alive and still recorded in
+	// the pidfile. On the next fresh startup the extension must force-kill any recorded child whose
+	// process is still alive (a dead record needs no kill) and then clear the pidfile, since none of
+	// those runs belong to this new session. Liveness and kill are real OS effects, so both are
+	// injected; the pidfile is a real temp file as in the other lifecycle tests.
+	const aliveOrphan: InflightRecord = { runId: "alive-run", pid: 5001, startedAt: 1 };
+	const deadOrphan: InflightRecord = { runId: "dead-run", pid: 5002, startedAt: 2 };
+
+	const dir = await tempCwd();
+	const inflightPath = join(dir, INFLIGHT_FILE);
+	await mkdir(dirname(inflightPath), { recursive: true });
+	writeFileSync(inflightPath, serializeInflight([aliveOrphan, deadOrphan]), "utf8");
+
+	const killed: number[] = [];
+	const fake = makeFakePi();
+	subagents(fake.pi, {
+		processAlive: (record: InflightRecord) => record.pid === aliveOrphan.pid,
+		killProcess: (pid: number) => killed.push(pid),
+	});
+	assert.ok(fake.sessionStartHandler, "the extension must register a session_start handler");
+
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as SessionStartCtx;
+	await fake.sessionStartHandler({ type: "session_start", reason: "startup" }, ctx);
+
+	assert.deepEqual(killed, [aliveOrphan.pid], "only the still-alive orphan's pid must be force-killed");
+	const remaining = parseInflight(existsSync(inflightPath) ? readFileSync(inflightPath, "utf8") : "");
+	assert.equal(remaining.length, 0, "the pidfile must be cleared once startup orphans are reaped");
+});
+
+test("on a non-startup session_start, the live session's own in-flight child survives and the pidfile is left intact", async () => {
+	// session_start also fires mid-session ("reload", "new", "resume", "fork"), when the pidfile
+	// records THIS live session's own in-flight children. Reaping then would force-kill a running
+	// child, so reaping must be restricted to a fresh "startup": a "reload" must touch neither the
+	// live child nor its pidfile record. The seeded record stands in for that own in-flight child.
+	const liveChild: InflightRecord = { runId: "live-run", pid: 6001, startedAt: 1 };
+
+	const dir = await tempCwd();
+	const inflightPath = join(dir, INFLIGHT_FILE);
+	await mkdir(dirname(inflightPath), { recursive: true });
+	writeFileSync(inflightPath, serializeInflight([liveChild]), "utf8");
+
+	const killed: number[] = [];
+	const fake = makeFakePi();
+	subagents(fake.pi, {
+		processAlive: () => true,
+		killProcess: (pid: number) => killed.push(pid),
+	});
+	assert.ok(fake.sessionStartHandler, "the extension must register a session_start handler");
+
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as SessionStartCtx;
+	await fake.sessionStartHandler({ type: "session_start", reason: "reload" }, ctx);
+
+	assert.deepEqual(killed, [], "a non-startup session_start must not reap the live session's own in-flight child");
+	const remaining = parseInflight(existsSync(inflightPath) ? readFileSync(inflightPath, "utf8") : "");
+	assert.deepEqual(remaining, [liveChild], "a non-startup session_start must leave the pidfile record untouched");
+});
+
 /** A tool ctx rooted at a real temp dir, so loadPersonas and the session precondition read real files. */
 const continueToolCtx = (cwd: string): ToolCtx => ({ cwd, ui: { notify() {} }, hasUI: false }) as unknown as ToolCtx;
 
 test("agent_continue resumes a persona's session with --session --continue and its tools, and re-applies the persona's system prompt", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
 	assert.ok(continueTool, "the extension must register the agent_continue tool");
 
@@ -541,7 +657,7 @@ test("agent_continue resumes a persona's session with --session --continue and i
 
 test("agent_continue for an unknown persona returns a friendly error and does not spawn", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
 	assert.ok(continueTool, "the extension must register the agent_continue tool");
 
@@ -557,7 +673,7 @@ test("agent_continue for an unknown persona returns a friendly error and does no
 
 test("agent_continue for a persona with no prior session returns a friendly error and does not spawn", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
 	assert.ok(continueTool, "the extension must register the agent_continue tool");
 
@@ -578,7 +694,7 @@ test("a persona with an unsafe name dispatches with no --session flag (its name 
 	// like "a/b" is reachable. sessionPathFor returns null for it, so dispatch's null sub-case must
 	// run the child WITHOUT a --session flag rather than letting the name escape the sessions dir.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -599,7 +715,7 @@ test("agent_continue for a persona with an unsafe name returns the unsafe-name e
 	// resolveContinueTarget finds the persona by name, but sessionPathFor returns null for an unsafe
 	// name, so the continue must reject with the unsafe-name error before any child is spawned.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
 	assert.ok(continueTool, "the extension must register the agent_continue tool");
 
@@ -616,7 +732,7 @@ test("agent_continue for a persona with an unsafe name returns the unsafe-name e
 
 test("/agent-continue resumes a persona's session and injects the answer as a follow-up", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.continueHandler, "the extension must register the agent-continue command");
 
 	const dir = await tempCwd();
@@ -639,7 +755,7 @@ test("/agent-continue resumes a persona's session and injects the answer as a fo
 
 test("/agent-continue for a persona with no prior session notifies and does not spawn", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.continueHandler, "the extension must register the agent-continue command");
 
 	const dir = await tempCwd();
@@ -657,7 +773,7 @@ test("/agent-continue for a persona with no prior session notifies and does not 
 
 test("/agent-continue without a follow-up task notifies usage and does not resume", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.continueHandler, "the extension must register the agent-continue command");
 
 	const dir = await tempCwd();
