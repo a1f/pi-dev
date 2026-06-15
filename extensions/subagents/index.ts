@@ -13,9 +13,10 @@ import { fileURLToPath } from "node:url";
 
 import { Type } from "typebox";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DASHBOARD_WIDGET, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { renderDashboard } from "./dashboard.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
 import { loadPersonas, type Persona, resolveDispatch, splitFirstToken } from "./personas.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
@@ -69,6 +70,18 @@ export default function (pi: ExtensionAPI): void {
 	// Live record of this session's dispatched runs, surfaced by the agent_status tool.
 	const registry = new RunRegistry();
 
+	// Push the live grid dashboard of every tracked run into the footer, or clear it when there is
+	// nothing to show. A no-op without a UI: the print/RPC contexts have no setWidget, so calling it
+	// would throw. The widget always lands under one key so each refresh replaces the prior footer.
+	const refresh = (ctx: ExtensionContext): void => {
+		if (!ctx.hasUI) return;
+		const { personas } = loadPersonas(ctx.cwd);
+		const width = process.stdout.columns ?? 80;
+		const lines = renderDashboard({ records: registry.list(), personas, now: Date.now(), width });
+		if (lines.length > 0) ctx.ui.setWidget(DASHBOARD_WIDGET, lines, { placement: "aboveEditor" });
+		else ctx.ui.setWidget(DASHBOARD_WIDGET, undefined);
+	};
+
 	// Track a run, dispatch the child (with its persona + guardrails), mark it finished, then
 	// best-effort record it as a parent-session audit entry. Shared by the /agent command and the
 	// agent_dispatch tool so tracking + logging + audit live in one place. The run is registered
@@ -77,14 +90,16 @@ export default function (pi: ExtensionAPI): void {
 	// supplies the child's tools/model/system prompt — null fields fall back to buildSpawnArgv's
 	// defaults — and every child loads guardrails regardless. A persistence failure must never
 	// break the dispatch.
-	const dispatch = async (opts: { task: string; cwd: string; persona: Persona | null; continueSession?: boolean }): Promise<DispatchResult> => {
-		const { task, cwd, persona, continueSession = false } = opts;
+	const dispatch = async (opts: { task: string; cwd: string; persona: Persona | null; ctx: ExtensionContext; continueSession?: boolean }): Promise<DispatchResult> => {
+		const { task, cwd, persona, ctx, continueSession = false } = opts;
 		const runId = defaultRunId();
 		const startedAt = Date.now();
 		// Wire kill to abort: registering onKill before the await keeps the in-flight run
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
-		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
+		registry.register({ runId, task, startedAt, persona: persona?.name ?? null, onKill: () => controller.abort() });
+		// Surface the run as a live card immediately, before the await blocks on the child.
+		refresh(ctx);
 		// A persona owns one rolling per-persona session file: --session selects it and is what
 		// drives resumption, so the first dispatch starts the conversation and a later dispatch
 		// continues it. A persona-less dispatch stays session-free; an unsafe persona name yields
@@ -121,6 +136,8 @@ export default function (pi: ExtensionAPI): void {
 			continueSession,
 		});
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
+		// Flip the card from running to done/error now the run has terminated.
+		refresh(ctx);
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
@@ -155,7 +172,7 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify(`[${LABEL}] usage: /${COMMAND} [persona] <task>`, "warning");
 				return;
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona });
+			const result = await dispatch({ task, cwd: ctx.cwd, persona, ctx });
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -177,7 +194,7 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify(`[${LABEL}] ${target.error}`, "warning");
 				return;
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, continueSession: true });
+			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, ctx, continueSession: true });
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -190,7 +207,7 @@ export default function (pi: ExtensionAPI): void {
 			task: Type.String({ description: "The task for the subagent to perform." }),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			const result = await dispatch({ task: params.task, cwd: ctx.cwd, persona: null });
+			const result = await dispatch({ task: params.task, cwd: ctx.cwd, persona: null, ctx });
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
 		},
 	});
@@ -209,7 +226,7 @@ export default function (pi: ExtensionAPI): void {
 			if (!target.ok) {
 				return { content: [{ type: "text", text: target.error }], details: { ok: false, error: target.error } };
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, continueSession: true });
+			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, ctx, continueSession: true });
 			return { content: [{ type: "text", text: formatReply(task, result) }], details: result };
 		},
 	});
