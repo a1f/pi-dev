@@ -32,9 +32,18 @@ export function createLimiter(cap: number): ConcurrencyLimiter {
 		}
 	};
 
-	// Run fn under the held slot and release it when fn settles (pass-through on rejection), so a
-	// failed task never wedges the queue.
-	const settle = <T>(fn: () => Promise<T>): Promise<T> => fn().finally(release);
+	// Run fn under the held slot and release it on every outcome — resolution, async rejection, or a
+	// synchronous throw turned into a rejected promise — so a failing task never wedges the queue.
+	const settle = <T>(fn: () => Promise<T>): Promise<T> => {
+		let started: Promise<T>;
+		try {
+			started = fn(); // invoked synchronously to preserve run()'s under-cap fast path
+		} catch (error) {
+			release();
+			return Promise.reject(error);
+		}
+		return started.finally(release);
+	};
 
 	// Take a free slot and invoke fn synchronously when one is open AND nobody is already queued;
 	// otherwise wait for release() to hand over a slot — so a newcomer can never jump an earlier

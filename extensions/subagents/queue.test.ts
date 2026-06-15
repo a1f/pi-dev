@@ -157,3 +157,36 @@ test("createLimiter(0) floors the cap to 1 so tasks run one at a time instead of
 	assert.equal(limiter.active, 0);
 	assert.equal(limiter.queued, 0);
 });
+
+test("a task that throws synchronously rejects run()'s promise instead of throwing, and frees the slot", async () => {
+	// run() promises to resolve/reject with fn's outcome, but the `() => Promise<T>` type also admits an
+	// fn that throws synchronously. Such a throw must surface as a rejected promise — never as a throw
+	// out of run() — and the slot the task held must still be freed. We check "did not throw" first
+	// because a leaked slot would deadlock the slot-freed check below, so this ordering keeps the failure
+	// a fast assertion rather than a hang.
+	const limiter = createLimiter(1);
+	const syncThrower: () => Promise<never> = () => {
+		throw new Error("boom");
+	};
+
+	let threwSync = false;
+	let runResult: Promise<never> | undefined;
+	try {
+		runResult = limiter.run(syncThrower);
+	} catch {
+		threwSync = true;
+	}
+	assert.equal(threwSync, false, "run() must return a rejected promise, not throw synchronously");
+
+	assert.ok(runResult, "run() must return a promise even when fn throws synchronously");
+	await assert.rejects(runResult, /boom/);
+
+	// With cap 1, a later task only runs if the throwing task's slot was released; it would hang here
+	// otherwise, which is why the synchronous-throw check above must gate this one.
+	let ran = false;
+	await limiter.run(async () => {
+		ran = true;
+	});
+	assert.equal(ran, true, "a task submitted after the throw must run, proving the slot was freed");
+	assert.equal(limiter.active, 0);
+});
