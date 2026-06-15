@@ -115,6 +115,16 @@ test("a rejected task propagates its rejection yet frees the slot so the queue k
 	assert.equal(limiter.queued, 0);
 });
 
+test("run starts an under-cap task synchronously (fn runs before run() returns control)", () => {
+	// The under-cap fast path must invoke fn during the run() call, not after a microtask, so a
+	// caller can observe fn's synchronous side effects the instant it dispatches a slot-free task.
+	let ran = false;
+	void createLimiter(2).run(async () => {
+		ran = true;
+	});
+	assert.equal(ran, true, "an under-cap task must run synchronously, before run() returns control");
+});
+
 test("createLimiter(0) floors the cap to 1 so tasks run one at a time instead of deadlocking", async () => {
 	const limiter = createLimiter(0);
 	const started: number[] = [];

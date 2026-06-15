@@ -16,14 +16,15 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DASHBOARD_REFRESH_MS, DASHBOARD_WIDGET, DEFAULT_TIMEOUT_MS, INFLIGHT_FILE, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DASHBOARD_REFRESH_MS, DASHBOARD_WIDGET, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_MS, INFLIGHT_FILE, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { renderDashboard } from "./dashboard.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
 import { type InflightRecord, parseInflight, reapOrphans, serializeInflight } from "./orphans.ts";
 import { loadPersonas, type Persona, resolveDispatch, splitFirstToken } from "./personas.ts";
+import { createLimiter } from "./queue.ts";
 import { createDashboardRefresher } from "./refresh.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
-import { defaultRunId, formatReply, runAgent, type DispatchResult, type LogWriter } from "./runner.ts";
+import { defaultRunId, EMPTY_RUN_STATE, formatReply, runAgent, type DispatchResult, type LogWriter } from "./runner.ts";
 import { sessionPathFor } from "./session.ts";
 import { defaultSpawnDeps, makeSpawnExec, type SpawnExec } from "./spawn.ts";
 
@@ -40,6 +41,8 @@ export interface SubagentDeps {
 	processAlive?: (record: InflightRecord) => boolean;
 	/** Force-kill injected so the OS effect is fakeable: terminates a reaped orphan by pid. */
 	killProcess?: (pid: number) => void;
+	/** Cap on how many children run at once, injected so tests can exercise the FIFO queue at a small cap; defaults to DEFAULT_CONCURRENCY. */
+	concurrency?: number;
 }
 
 // The pidfile's imperative shell: record/remove are synchronous so the pid persists before any
@@ -58,7 +61,7 @@ function recordInflight(cwd: string, record: InflightRecord): void {
 
 /**
  * Drop a finished run from the pidfile so it is never mistaken for an orphan, treating a missing file as a no-op so completion never throws.
- * Note: this read-modify-write is not concurrency-safe; concurrent completions can reinstate a stale record, which is acceptable until the concurrency cap + FIFO queue land in PR 7.2 (a dead stale record is harmless — the next startup reap drops it since the process is gone).
+ * Note: this read-modify-write is not concurrency-safe; under the concurrency cap two children completing at once can reinstate a stale record for an already-dead child, which stays harmless — the next startup reap drops it since that pid is no longer alive — while a live child's record is never dropped, because each completion filters out only its own runId.
  */
 function removeInflight(cwd: string, runId: string): void {
 	const path = join(cwd, INFLIGHT_FILE);
@@ -140,6 +143,10 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	// Live record of this session's dispatched runs, surfaced by the agent_status tool.
 	const registry = new RunRegistry();
 
+	// Bound how many children run at once; dispatches past the cap wait in this limiter's FIFO queue
+	// and drain as slots free. One limiter per extension instance, so the cap spans every dispatch.
+	const limiter = createLimiter(deps.concurrency ?? DEFAULT_CONCURRENCY);
+
 	// The most recent UI context seen by a dispatch, so the refresh timer can re-render between
 	// handler calls. Null until the first dispatch; a no-UI context leaves refresh a no-op.
 	let lastUiCtx: ExtensionContext | null = null;
@@ -181,8 +188,10 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	// Track a run, dispatch the child (with its persona + guardrails), mark it finished, then
 	// best-effort record it as a parent-session audit entry. Shared by the /agent command and the
 	// agent_dispatch tool so tracking + logging + audit live in one place. The run is registered
-	// synchronously before the first await — so an in-flight dispatch is observable as "running" —
-	// and the same runId is threaded into runAgent so its log lines up. A persona (when matched)
+	// synchronously as "queued" before the first await, then a concurrency-capped slot promotes it
+	// to "running"; under the cap that promotion is synchronous too, so a lone in-flight dispatch is
+	// observable as "running" right away, while dispatches past the cap stay "queued" until a slot
+	// frees. The same runId is threaded into runAgent so its log lines up. A persona (when matched)
 	// supplies the child's tools/model/system prompt — null fields fall back to buildSpawnArgv's
 	// defaults — and every child loads guardrails regardless. A persistence failure must never
 	// break the dispatch.
@@ -191,53 +200,68 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 		const cwd = ctx.cwd;
 		lastUiCtx = ctx;
 		const runId = defaultRunId();
-		const startedAt = Date.now();
-		// Wire kill to abort: registering onKill before the await keeps the in-flight run
-		// observable as running, and aborting the controller cancels the child's exec.
+		const enqueuedAt = Date.now();
+		// Wire kill to abort: registering onKill before any await keeps the run observable (queued,
+		// then running), and aborting the controller cancels the child's exec — even while it waits.
 		const controller = new AbortController();
-		registry.register({ runId, task, startedAt, persona: persona?.name ?? null, onKill: () => controller.abort() });
-		// Surface the run as a live card immediately, before the await blocks on the child, and start
-		// the refresh timer so its elapsed time animates while the child runs.
+		registry.register({ runId, task, startedAt: enqueuedAt, persona: persona?.name ?? null, status: "queued", onKill: () => controller.abort() });
+		// Surface the run as a queued card immediately, before the limiter may make it wait, and start
+		// the refresh timer so its elapsed time animates from the moment it is dispatched.
 		refresh(ctx);
 		refresher.poke();
-		// Wrap the injected exec to record this child's pid in the pidfile the instant it spawns:
-		// runAgent only forwards {timeout,signal,cwd}, so the onSpawn hook lives in this wrapper.
-		const trackedExec: SpawnExec = (command, args, options) =>
-			exec(command, args, { ...options, onSpawn: (pid) => recordInflight(cwd, { runId, pid, startedAt }) });
-		// A persona owns one rolling per-persona session file: --session selects it and is what
-		// drives resumption, so the first dispatch starts the conversation and a later dispatch
-		// continues it. A persona-less dispatch stays session-free; an unsafe persona name yields
-		// a null path → run without a session.
-		const session = persona === null ? null : sessionPathFor(cwd, persona.name);
-		if (session !== null) {
-			// Defensively pre-create the sessions dir: pi mkdirs it under the default config, but a
-			// session-dir override (PI_CODING_AGENT_SESSION_DIR / --session-dir / settings.sessionDir)
-			// would not, and the first persist (openSync(path, "wx")) would then ENOENT and silently
-			// break resumption. Best-effort, mirroring the runs-dir create in writeLog.
-			try {
-				await mkdir(dirname(session), { recursive: true });
-			} catch {
-				// Swallow: a failed pre-create must never derail the dispatch; pi may still create it.
+		// Run under the concurrency cap: an under-cap dispatch runs this body synchronously (so the run
+		// flips to "running" and spawns its child before control returns), while a dispatch past the cap
+		// waits here in FIFO order and runs only once an in-flight child frees a slot.
+		const result = await limiter.run(async (): Promise<DispatchResult> => {
+			const startedAt = Date.now();
+			// Promote the queued run to running, restamping so elapsed measures run time not queue wait.
+			// A run killed while still queued never starts: start() refuses it, so report it as cancelled
+			// (no child, no log) and leave its "killed" status for the no-op finish below to preserve.
+			if (!registry.start({ runId, startedAt })) {
+				return { ok: false, finalText: null, malformed: 0, code: 1, timedOut: false, runId, logPath: null, durationMs: 0, state: EMPTY_RUN_STATE, error: "cancelled before it started" };
 			}
-		}
-		const result = await runAgent(task, trackedExec, {
-			timeoutMs: DEFAULT_TIMEOUT_MS,
-			cwd,
-			writeLog,
-			runId,
-			signal: controller.signal,
-			extensions: [GUARDRAILS_EXTENSION],
-			tools: persona?.tools ?? undefined,
-			model: persona?.model ?? undefined,
-			// An empty/whitespace-only persona body trims to "" upstream; map it to undefined so
-			// buildSpawnArgv omits --system-prompt and the child keeps its default, rather than
-			// emitting `--system-prompt ""` and replacing that default with nothing. The continue
-			// path applies it too: pi rebuilds the system prompt from this flag at every start and
-			// never restores one from the session, so re-sending the persona prompt is required to
-			// keep the resumed turn in-persona — it is not duplicated into the conversation history.
-			systemPrompt: persona?.systemPrompt || undefined,
-			session: session ?? undefined,
-			continueSession,
+			// Flip the card from queued to running now a slot is held; poke keeps the timer animating.
+			refresh(ctx);
+			refresher.poke();
+			// Wrap the injected exec to record this child's pid in the pidfile the instant it spawns:
+			// runAgent only forwards {timeout,signal,cwd}, so the onSpawn hook lives in this wrapper.
+			const trackedExec: SpawnExec = (command, args, options) =>
+				exec(command, args, { ...options, onSpawn: (pid) => recordInflight(cwd, { runId, pid, startedAt }) });
+			// A persona owns one rolling per-persona session file: --session selects it and is what
+			// drives resumption, so the first dispatch starts the conversation and a later dispatch
+			// continues it. A persona-less dispatch stays session-free; an unsafe persona name yields
+			// a null path → run without a session.
+			const session = persona === null ? null : sessionPathFor(cwd, persona.name);
+			if (session !== null) {
+				// Defensively pre-create the sessions dir: pi mkdirs it under the default config, but a
+				// session-dir override (PI_CODING_AGENT_SESSION_DIR / --session-dir / settings.sessionDir)
+				// would not, and the first persist (openSync(path, "wx")) would then ENOENT and silently
+				// break resumption. Best-effort, mirroring the runs-dir create in writeLog.
+				try {
+					await mkdir(dirname(session), { recursive: true });
+				} catch {
+					// Swallow: a failed pre-create must never derail the dispatch; pi may still create it.
+				}
+			}
+			return await runAgent(task, trackedExec, {
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+				cwd,
+				writeLog,
+				runId,
+				signal: controller.signal,
+				extensions: [GUARDRAILS_EXTENSION],
+				tools: persona?.tools ?? undefined,
+				model: persona?.model ?? undefined,
+				// An empty/whitespace-only persona body trims to "" upstream; map it to undefined so
+				// buildSpawnArgv omits --system-prompt and the child keeps its default, rather than
+				// emitting `--system-prompt ""` and replacing that default with nothing. The continue
+				// path applies it too: pi rebuilds the system prompt from this flag at every start and
+				// never restores one from the session, so re-sending the persona prompt is required to
+				// keep the resumed turn in-persona — it is not duplicated into the conversation history.
+				systemPrompt: persona?.systemPrompt || undefined,
+				session: session ?? undefined,
+				continueSession,
+			});
 		});
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
 		// The child is no longer in flight, so drop its pidfile record before the (best-effort) audit.

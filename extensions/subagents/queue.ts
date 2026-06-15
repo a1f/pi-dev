@@ -1,7 +1,9 @@
 // FIFO concurrency limiter, kept pure (no clock, no IO) so tests can settle tasks by hand and
 // watch how queued work gets scheduled. The subtle invariant: a freed slot is handed straight to
 // the oldest waiter rather than released back to the pool, so submission order survives even when
-// a fresh run() races a settling task for the slot.
+// a fresh run() races a settling task for the slot. An under-cap task takes the fast path and is
+// invoked synchronously during run() (no microtask delay), so a caller can observe its synchronous
+// side effects before run() returns control; only an at-cap task is deferred until a slot frees.
 
 /** Bounds how many async tasks run at once and queues the rest, draining queued work FIFO. */
 export interface ConcurrencyLimiter {
@@ -19,18 +21,6 @@ export function createLimiter(cap: number): ConcurrencyLimiter {
 	let active = 0;
 	const waiters: Array<() => void> = [];
 
-	// Take a slot only if one is free AND nobody is already queued; otherwise wait for release()
-	// to hand us a slot, so a newcomer can never jump ahead of an earlier waiter.
-	const acquire = (): Promise<void> => {
-		if (active < limit && waiters.length === 0) {
-			active += 1;
-			return Promise.resolve();
-		}
-		return new Promise<void>((resolve) => {
-			waiters.push(() => resolve());
-		});
-	};
-
 	// Give the freed slot to the oldest waiter without dropping `active` (a direct handoff, so no
 	// concurrent run() can grab it); only when nobody waits does the slot truly close.
 	const release = (): void => {
@@ -42,13 +32,21 @@ export function createLimiter(cap: number): ConcurrencyLimiter {
 		}
 	};
 
-	const run = async <T>(fn: () => Promise<T>): Promise<T> => {
-		await acquire();
-		try {
-			return await fn();
-		} finally {
-			release();
+	// Run fn under the held slot and release it when fn settles (pass-through on rejection), so a
+	// failed task never wedges the queue.
+	const settle = <T>(fn: () => Promise<T>): Promise<T> => fn().finally(release);
+
+	// Take a free slot and invoke fn synchronously when one is open AND nobody is already queued;
+	// otherwise wait for release() to hand over a slot — so a newcomer can never jump an earlier
+	// waiter — and run fn once it arrives.
+	const run = <T>(fn: () => Promise<T>): Promise<T> => {
+		if (active < limit && waiters.length === 0) {
+			active += 1;
+			return settle(fn);
 		}
+		return new Promise<void>((resolve) => {
+			waiters.push(() => resolve());
+		}).then(() => settle(fn));
 	};
 
 	return {

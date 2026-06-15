@@ -530,6 +530,54 @@ test("agent_kill aborts the in-flight child and the run stays killed after a lat
 	assert.equal(finalRun.status, "killed", "a late completion must not overwrite a killed run");
 });
 
+test("a dispatch past the concurrency cap is queued, not run, and drains once a slot frees", async () => {
+	// The concurrency cap bounds how many children run at once: with the cap at 2, a third
+	// concurrent dispatch must be registered as "queued" rather than "running", and acquire a slot
+	// only once an in-flight child finishes. One shared deferred holds every child's exec open so the
+	// runs sit at the cap; settling it completes the running children, frees their slots, and lets the
+	// queued run start on the same resolved exec — so a single settle drains all three.
+	let settleExec!: (result: ExecResultLike) => void;
+	const pendingExec = new Promise<ExecResultLike>((resolve) => {
+		settleExec = resolve;
+	});
+	const dir = await tempCwd();
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	const fake = makeFakePi(() => pendingExec);
+	subagents(fake.pi, { exec: fake.exec, concurrency: 2 });
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+	const statusTool = fake.tools.find((tool) => tool.name === "agent_status");
+	assert.ok(statusTool, "the extension must register the agent_status tool");
+
+	// Fire three dispatches without awaiting, so all three are in flight against a cap of two.
+	const dispatched = [
+		fake.commandHandler("map the repo", ctx),
+		fake.commandHandler("scan the tests", ctx),
+		fake.commandHandler("read the docs", ctx),
+	];
+	await new Promise<void>((resolve) => {
+		setImmediate(() => resolve());
+	});
+
+	const atCap = statusRuns(await statusTool.execute("id", {}, undefined, undefined, toolCtx));
+	const running = atCap.filter((run) => run.status === "running");
+	const queued = atCap.filter((run) => run.status === "queued");
+	assert.equal(running.length, 2, "the cap of 2 must hold: only two children may run at once");
+	assert.equal(queued.length, 1, "the dispatch past the cap must wait queued, not run");
+
+	// Settling the shared deferred finishes the two running children, frees their slots, and lets the
+	// queued dispatch acquire one and run the same resolved exec — so awaiting all three resolves.
+	settleExec({ stdout: happyStream, stderr: "", code: 0, killed: false });
+	await Promise.all(dispatched);
+
+	const drained = statusRuns(await statusTool.execute("id", {}, undefined, undefined, toolCtx));
+	assert.equal(drained.length, 3, "all three dispatches must be tracked");
+	assert.ok(
+		drained.every((run) => run.status === "done"),
+		"once a slot frees the queue must drain: every run finishes done, none left queued or running",
+	);
+});
+
 test("a dispatch records its child's pid in the in-flight pidfile while running and removes it on completion", async () => {
 	// Orphan cleanup needs each live child persisted to a pidfile so a later session can reap
 	// children a dead session left behind. Hold the child's exec open with a deferred so the run is

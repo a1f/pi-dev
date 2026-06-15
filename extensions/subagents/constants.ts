@@ -37,11 +37,13 @@ export const TAIL_LINES = 20;
 
 /**
  * Default per-dispatch wall-clock cap (ms) passed to the spawn wrapper, which SIGTERM→SIGKILLs
- * a child that overruns. This is the hung-child guard; timeout escalation and orphan
- * cleanup now ship in slice 7.1, while a concurrency cap and FIFO queue remain a later
- * PR (7.2).
+ * a child that overruns. This is the hung-child guard; timeout escalation and orphan cleanup
+ * ship in slice 7.1, and the concurrency cap and FIFO queue (see DEFAULT_CONCURRENCY) ship in 7.2.
  */
 export const DEFAULT_TIMEOUT_MS = 120_000;
+
+/** Default cap on how many subagent children run at once; the rest queue and drain FIFO (e.g. 6 dispatched at cap 4 → 2 wait their turn). */
+export const DEFAULT_CONCURRENCY = 4;
 
 /**
  * Parse-error messages returned by parsePersona. Named so call-sites stay terse and
