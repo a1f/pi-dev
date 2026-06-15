@@ -22,6 +22,7 @@ test("register creates a running record retrievable by id and present in the lis
 	const expected: RunRecord = {
 		runId: "r1",
 		task: "summarize the readme",
+		persona: null,
 		status: "running",
 		startedAt: 1000,
 		finishedAt: null,
@@ -33,6 +34,16 @@ test("register creates a running record retrievable by id and present in the lis
 	const all = reg.list();
 	assert.equal(all.length, 1);
 	assert.deepEqual(all[0], expected);
+});
+
+test("register tags a run with its dispatched persona, defaulting to null when none is given", () => {
+	const reg = new RunRegistry();
+
+	reg.register({ runId: "r1", task: "scout the repo", startedAt: 1000, persona: "scout" });
+	assert.equal(reg.get("r1")?.persona, "scout");
+
+	reg.register({ runId: "r2", task: "build the thing", startedAt: 2000 });
+	assert.equal(reg.get("r2")?.persona, null);
 });
 
 test("finish records the terminal status, final state, and finish time for both done and error", () => {

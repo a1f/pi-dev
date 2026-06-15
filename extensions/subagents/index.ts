@@ -14,12 +14,14 @@ import { fileURLToPath } from "node:url";
 
 import { Type } from "typebox";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DEFAULT_TIMEOUT_MS, INFLIGHT_FILE, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DASHBOARD_REFRESH_MS, DASHBOARD_WIDGET, DEFAULT_TIMEOUT_MS, INFLIGHT_FILE, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { renderDashboard } from "./dashboard.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
 import { type InflightRecord, parseInflight, reapOrphans, serializeInflight } from "./orphans.ts";
 import { loadPersonas, type Persona, resolveDispatch, splitFirstToken } from "./personas.ts";
+import { createDashboardRefresher } from "./refresh.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
 import { defaultRunId, formatReply, runAgent, type DispatchResult, type LogWriter } from "./runner.ts";
 import { sessionPathFor } from "./session.ts";
@@ -138,6 +140,44 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	// Live record of this session's dispatched runs, surfaced by the agent_status tool.
 	const registry = new RunRegistry();
 
+	// The most recent UI context seen by a dispatch, so the refresh timer can re-render between
+	// handler calls. Null until the first dispatch; a no-UI context leaves refresh a no-op.
+	let lastUiCtx: ExtensionContext | null = null;
+
+	// The persona roster the most recent command loaded, reused by refresh so the animation loop
+	// renders without re-reading disk on every tick. Empty until a command first loads personas;
+	// the command/tool handlers that call loadPersonas refresh it.
+	let lastPersonas: Persona[] = [];
+
+	// Push the live grid dashboard of every tracked run into the footer, or clear it when there is
+	// nothing to show. A no-op without a UI: the print/RPC contexts have no setWidget, so calling it
+	// would throw. The widget always lands under one key so each refresh replaces the prior footer.
+	const refresh = (ctx: ExtensionContext): void => {
+		if (!ctx.hasUI) return;
+		const width = process.stdout.columns ?? 80;
+		const lines = renderDashboard({ records: registry.list(), personas: lastPersonas, now: Date.now(), width });
+		if (lines.length > 0) ctx.ui.setWidget(DASHBOARD_WIDGET, lines, { placement: "aboveEditor" });
+		else ctx.ui.setWidget(DASHBOARD_WIDGET, undefined);
+	};
+
+	// One self-stopping timer per extension instance: it re-renders the dashboard on a cadence while
+	// any run is live (so a running child's elapsed time animates even though exec is non-streaming)
+	// and clears itself once every run has finished. poke() after each register/finish (re)starts it.
+	const refresher = createDashboardRefresher({
+		intervalMs: DASHBOARD_REFRESH_MS,
+		isActive: () => registry.list().some((run) => run.status === "running"),
+		onTick: () => {
+			if (lastUiCtx !== null) refresh(lastUiCtx);
+		},
+	});
+
+	// Stop the refresher when the session ends so its self-stopping interval can never outlive the
+	// session. The real ExtensionAPI always provides `on`; the optional call is a no-op only for the
+	// partial test doubles that omit it.
+	pi.on?.("session_shutdown", () => {
+		refresher.stop();
+	});
+
 	// Track a run, dispatch the child (with its persona + guardrails), mark it finished, then
 	// best-effort record it as a parent-session audit entry. Shared by the /agent command and the
 	// agent_dispatch tool so tracking + logging + audit live in one place. The run is registered
@@ -146,14 +186,20 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	// supplies the child's tools/model/system prompt — null fields fall back to buildSpawnArgv's
 	// defaults — and every child loads guardrails regardless. A persistence failure must never
 	// break the dispatch.
-	const dispatch = async (opts: { task: string; cwd: string; persona: Persona | null; continueSession?: boolean }): Promise<DispatchResult> => {
-		const { task, cwd, persona, continueSession = false } = opts;
+	const dispatch = async (opts: { task: string; persona: Persona | null; ctx: ExtensionContext; continueSession?: boolean }): Promise<DispatchResult> => {
+		const { task, persona, ctx, continueSession = false } = opts;
+		const cwd = ctx.cwd;
+		lastUiCtx = ctx;
 		const runId = defaultRunId();
 		const startedAt = Date.now();
 		// Wire kill to abort: registering onKill before the await keeps the in-flight run
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
-		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
+		registry.register({ runId, task, startedAt, persona: persona?.name ?? null, onKill: () => controller.abort() });
+		// Surface the run as a live card immediately, before the await blocks on the child, and start
+		// the refresh timer so its elapsed time animates while the child runs.
+		refresh(ctx);
+		refresher.poke();
 		// Wrap the injected exec to record this child's pid in the pidfile the instant it spawns:
 		// runAgent only forwards {timeout,signal,cwd}, so the onSpawn hook lives in this wrapper.
 		const trackedExec: SpawnExec = (command, args, options) =>
@@ -196,6 +242,10 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
 		// The child is no longer in flight, so drop its pidfile record before the (best-effort) audit.
 		removeInflight(cwd, runId);
+		// Flip the card from running to done/error now the run has terminated; poke lets the timer
+		// self-stop on its next tick once this was the last running run.
+		refresh(ctx);
+		refresher.poke();
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
@@ -247,13 +297,14 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 			// Surface persona-load warnings (a malformed file is skipped, never silently dropped),
 			// mirroring the guardrails sibling's notify pattern, before resolving the dispatch.
 			const { personas, warnings } = loadPersonas(ctx.cwd);
+			lastPersonas = personas;
 			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
 			const { persona, task } = resolveDispatch(args, personas);
 			if (task === "") {
 				ctx.ui.notify(`[${LABEL}] usage: /${COMMAND} [persona] <task>`, "warning");
 				return;
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona });
+			const result = await dispatch({ task, persona, ctx });
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -269,13 +320,14 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 				return;
 			}
 			const { personas, warnings } = loadPersonas(ctx.cwd);
+			lastPersonas = personas;
 			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
 			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
 			if (!target.ok) {
 				ctx.ui.notify(`[${LABEL}] ${target.error}`, "warning");
 				return;
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, continueSession: true });
+			const result = await dispatch({ task, persona: target.persona, ctx, continueSession: true });
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -288,7 +340,7 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 			task: Type.String({ description: "The task for the subagent to perform." }),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			const result = await dispatch({ task: params.task, cwd: ctx.cwd, persona: null });
+			const result = await dispatch({ task: params.task, persona: null, ctx });
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
 		},
 	});
@@ -303,11 +355,12 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 		}),
 		execute: async (_toolCallId, { persona: name, task }, _signal, _onUpdate, ctx) => {
 			const { personas } = loadPersonas(ctx.cwd);
+			lastPersonas = personas;
 			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
 			if (!target.ok) {
 				return { content: [{ type: "text", text: target.error }], details: { ok: false, error: target.error } };
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, continueSession: true });
+			const result = await dispatch({ task, persona: target.persona, ctx, continueSession: true });
 			return { content: [{ type: "text", text: formatReply(task, result) }], details: result };
 		},
 	});

@@ -21,6 +21,8 @@ const STATUS_GLYPH: Record<RunStatus, string> = {
 export interface RunRecord {
 	runId: string;
 	task: string;
+	/** Persona the run was dispatched under, or null when none was named. */
+	persona: string | null;
 	status: RunStatus;
 	startedAt: number;
 	/** Wall-clock end time, or null while the run is still running. */
@@ -40,11 +42,12 @@ export class RunRegistry {
 	readonly #onKill = new Map<string, () => void>();
 
 	/** Record a newly dispatched run as running, with an empty initial state. */
-	register(run: { runId: string; task: string; startedAt: number; onKill?: () => void }): void {
-		const { runId, task, startedAt, onKill } = run;
+	register(run: { runId: string; task: string; startedAt: number; persona?: string | null; onKill?: () => void }): void {
+		const { runId, task, startedAt, persona, onKill } = run;
 		this.#records.set(runId, {
 			runId,
 			task,
+			persona: persona ?? null,
 			status: "running",
 			startedAt,
 			finishedAt: null,

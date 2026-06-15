@@ -788,3 +788,51 @@ test("/agent-continue without a follow-up task notifies usage and does not resum
 	const usage = notes.find((note) => note.level === "warning" && /usage/i.test(note.msg));
 	assert.ok(usage, "a missing follow-up task must notify the command's usage");
 });
+
+/** One setWidget call as the capturing ctx records it; content stays unknown so the test narrows it. */
+interface WidgetCall {
+	key: string;
+	content: unknown;
+	options: { placement?: string } | undefined;
+}
+
+/** A command ctx with a live UI that records every setWidget call, so a test can assert the dashboard was pushed. */
+const widgetCapturingCtx = (cwd: string, widgets: WidgetCall[]): CommandCtx =>
+	({
+		cwd,
+		hasUI: true,
+		ui: {
+			notify() {},
+			setWidget(key: string, content: unknown, options?: { placement?: string }): void {
+				widgets.push({ key, content, options });
+			},
+		},
+	}) as unknown as CommandCtx;
+
+test("dispatching a persona through /agent pushes the live grid dashboard showing the persona's card", async () => {
+	// The grid widget is the user-facing surface: a persona dispatch must render the roster to the
+	// footer (setWidget, aboveEditor) and tag the run with its persona, so the dispatched run shows
+	// up as scout's card — an untagged run would be titled by its task instead.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repo.\ntools:\n  - read\n---\nYou are scout.");
+	const widgets: WidgetCall[] = [];
+
+	await fake.commandHandler("scout map the repo", widgetCapturingCtx(dir, widgets));
+
+	assert.ok(widgets.length > 0, "dispatching a persona must push the grid dashboard to the UI via setWidget");
+	const dashboard = widgets.find((widget): widget is WidgetCall & { content: string[] } => Array.isArray(widget.content));
+	assert.ok(dashboard, "the pushed widget must carry the rendered grid as a string array");
+	assert.ok(
+		dashboard.content.every((line) => typeof line === "string"),
+		"the dashboard content must be an array of strings",
+	);
+	assert.ok(
+		dashboard.content.join("\n").includes("scout"),
+		"the dashboard must show the dispatched run as scout's card, proving the run was tagged with its persona",
+	);
+	assert.equal(dashboard.options?.placement, "aboveEditor", "the dashboard widget must be placed above the editor");
+});

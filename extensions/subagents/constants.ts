@@ -14,6 +14,12 @@ export const CONTINUE_COMMAND = "agent-continue";
 /** Command that tails the most recent run's log. */
 export const LOG_COMMAND = "agent-log";
 
+/** Widget key the live grid dashboard is pushed under, so each refresh replaces the prior footer. */
+export const DASHBOARD_WIDGET = "subagents";
+
+/** How often (ms) the dashboard re-renders while any run is live, so elapsed time animates between handler calls. */
+export const DASHBOARD_REFRESH_MS = 1000;
+
 /** Per-run JSONL logs land here, relative to the project cwd. */
 export const RUNS_DIR = ".pi/runs";
 
