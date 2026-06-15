@@ -205,6 +205,7 @@ test("formatReply quotes the task and answer on success, and signals failure wit
 		finalText: "The README explains the setup.",
 		malformed: 0,
 		code: 0,
+		timedOut: false,
 		runId: "r1",
 		logPath: "/work/.pi/runs/r1.jsonl",
 		durationMs: 5,
@@ -220,6 +221,7 @@ test("formatReply quotes the task and answer on success, and signals failure wit
 		finalText: null,
 		malformed: 0,
 		code: 1,
+		timedOut: false,
 		runId: null,
 		logPath: null,
 		durationMs: 0,
@@ -227,4 +229,28 @@ test("formatReply quotes the task and answer on success, and signals failure wit
 
 	assert.ok(bad.includes("1"), "failure reply should include the exit code");
 	assert.ok(!/\bsuccess\b/i.test(bad), "failure reply must not present as a success");
+});
+
+test("runAgent flags a timeout-killed child as timedOut and formatReply surfaces it, but an operator-aborted kill is not", async () => {
+	// A child the runner kills on its own timeout and one an operator kills via agent_kill both
+	// resolve as a killed child (exec returns killed:true). They are told apart by the run's
+	// AbortSignal: a timeout fires with the signal un-aborted, while agent_kill aborts it first.
+	const killedExec: ExecLike = async () => ({ stdout: "", stderr: "", code: 143, killed: true });
+
+	// Timeout: killed with no operator abort -> timedOut, and a timed-out run is not a success.
+	const timeoutRun = await runAgent("summarize the README", killedExec);
+	assert.equal(timeoutRun.timedOut, true, "a killed child whose signal never aborted timed out");
+	assert.equal(timeoutRun.ok, false, "a timed-out run did not complete");
+
+	// The follow-up message must read as a timeout, not as a bare nonzero exit (formatReply takes
+	// the outcome minus state; the full result is assignable, as index.ts passes it).
+	const reply = formatReply("summarize the README", timeoutRun);
+	assert.ok(/timed out|timeout/i.test(reply), "the reply must read as a timeout");
+	assert.ok(!/did not complete \(exit/.test(reply), "a timeout must not read as a plain nonzero exit");
+
+	// Operator kill: the same killed child, but the run's signal was aborted first -> not a timeout.
+	const killController = new AbortController();
+	killController.abort();
+	const operatorKill = await runAgent("summarize the README", killedExec, { signal: killController.signal });
+	assert.equal(operatorKill.timedOut, false, "an operator-aborted kill is not a timeout");
 });
