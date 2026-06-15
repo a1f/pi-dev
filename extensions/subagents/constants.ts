@@ -7,11 +7,18 @@ export const TOOL = "agent_dispatch";
 export const STATUS_TOOL = "agent_status";
 export const KILL_TOOL = "agent_kill";
 
+/** Tool and command that resume a persona's prior session in a fresh headless child. */
+export const CONTINUE_TOOL = "agent_continue";
+export const CONTINUE_COMMAND = "agent-continue";
+
 /** Command that tails the most recent run's log. */
 export const LOG_COMMAND = "agent-log";
 
 /** Per-run JSONL logs land here, relative to the project cwd. */
 export const RUNS_DIR = ".pi/runs";
+
+/** Per-persona session files land here, relative to the project cwd, so a persona can be resumed. */
+export const SESSIONS_DIR = ".pi/sessions";
 
 /** Custom entry type for the per-run audit record persisted via pi.appendEntry. */
 export const AUDIT_TYPE = "subagent_run";

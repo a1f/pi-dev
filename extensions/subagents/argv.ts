@@ -21,6 +21,10 @@ export interface SpawnArgvOptions {
 	model?: string;
 	/** Optional system prompt for the child (`--system-prompt <text>`); replaces, never appends. */
 	systemPrompt?: string;
+	/** Session file the child reads and writes (`--session <path>`), so a later dispatch can resume it. */
+	session?: string;
+	/** Resume the prior session (`--continue`); pair with `session` to continue a persona's conversation. */
+	continueSession?: boolean;
 	/**
 	 * Extensions to load explicitly (`--extension <path>` each). These survive `--no-extensions`,
 	 * which only disables auto-discovery — so a child keeps the recursion guard yet can still be
@@ -47,5 +51,10 @@ export function buildSpawnArgv(options: SpawnArgvOptions): string[] {
 	const model = options.model === undefined ? [] : ["--model", options.model];
 	const systemPrompt = options.systemPrompt === undefined ? [] : ["--system-prompt", options.systemPrompt];
 	const extensions = (options.extensions ?? []).flatMap((path) => ["--extension", path]);
-	return ["--mode", "json", ...model, ...systemPrompt, "--no-extensions", ...extensions, "--tools", tools.join(","), "-p", options.task];
+	// Session controls go in the slot right after `--mode json`: `--session <path>` selects the
+	// file and `--continue` resumes it. Both default to empty, so an unset session leaves the
+	// argv byte-for-byte unchanged from a plain one-shot dispatch.
+	const session = options.session === undefined ? [] : ["--session", options.session];
+	const continueSession = options.continueSession === true ? ["--continue"] : [];
+	return ["--mode", "json", ...session, ...continueSession, ...model, ...systemPrompt, "--no-extensions", ...extensions, "--tools", tools.join(","), "-p", options.task];
 }

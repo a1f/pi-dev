@@ -87,11 +87,12 @@ export function defaultRunId(): string {
 
 /**
  * runAgent's knobs: dispatch controls (timeout, cwd, log writer, run id) plus the spawn
- * options forwarded verbatim into buildSpawnArgv (tools/model/system prompt/extensions), so
- * the adapter can apply a persona and the guardrails extension to the child. The spawn subset
- * is picked straight from SpawnArgvOptions so those fields stay defined in exactly one place.
+ * options forwarded verbatim into buildSpawnArgv (tools/model/system prompt/extensions/session),
+ * so the adapter can apply a persona, the guardrails extension, and a resumable session to the
+ * child. The spawn subset is picked straight from SpawnArgvOptions so those fields stay defined
+ * in exactly one place.
  */
-export interface RunAgentOptions extends Pick<SpawnArgvOptions, "tools" | "model" | "systemPrompt" | "extensions"> {
+export interface RunAgentOptions extends Pick<SpawnArgvOptions, "tools" | "model" | "systemPrompt" | "extensions" | "session" | "continueSession"> {
 	timeoutMs?: number;
 	cwd?: string;
 	writeLog?: LogWriter;
