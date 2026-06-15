@@ -19,6 +19,7 @@ test("cardFromRecord maps a running record, deriving elapsed from now", () => {
 	const record: RunRecord = {
 		runId: "r1",
 		task: "scout the repo",
+		persona: null,
 		status: "running",
 		startedAt: 1000,
 		finishedAt: null,
@@ -47,6 +48,7 @@ test("cardFromRecord measures a finished record's elapsed against finishedAt, no
 	const record: RunRecord = {
 		runId: "r2",
 		task: "build the thing",
+		persona: null,
 		status: "done",
 		startedAt: 1000,
 		finishedAt: 6000,
