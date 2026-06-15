@@ -75,14 +75,18 @@ export default function (pi: ExtensionAPI): void {
 	// handler calls. Null until the first dispatch; a no-UI context leaves refresh a no-op.
 	let lastUiCtx: ExtensionContext | null = null;
 
+	// The persona roster the most recent command loaded, reused by refresh so the animation loop
+	// renders without re-reading disk on every tick. Empty until a command first loads personas;
+	// the command/tool handlers that call loadPersonas refresh it.
+	let lastPersonas: Persona[] = [];
+
 	// Push the live grid dashboard of every tracked run into the footer, or clear it when there is
 	// nothing to show. A no-op without a UI: the print/RPC contexts have no setWidget, so calling it
 	// would throw. The widget always lands under one key so each refresh replaces the prior footer.
 	const refresh = (ctx: ExtensionContext): void => {
 		if (!ctx.hasUI) return;
-		const { personas } = loadPersonas(ctx.cwd);
 		const width = process.stdout.columns ?? 80;
-		const lines = renderDashboard({ records: registry.list(), personas, now: Date.now(), width });
+		const lines = renderDashboard({ records: registry.list(), personas: lastPersonas, now: Date.now(), width });
 		if (lines.length > 0) ctx.ui.setWidget(DASHBOARD_WIDGET, lines, { placement: "aboveEditor" });
 		else ctx.ui.setWidget(DASHBOARD_WIDGET, undefined);
 	};
@@ -98,6 +102,13 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	// Stop the refresher when the session ends so its self-stopping interval can never outlive the
+	// session. The real ExtensionAPI always provides `on`; the optional call is a no-op only for the
+	// partial test doubles that omit it.
+	pi.on?.("session_shutdown", () => {
+		refresher.stop();
+	});
+
 	// Track a run, dispatch the child (with its persona + guardrails), mark it finished, then
 	// best-effort record it as a parent-session audit entry. Shared by the /agent command and the
 	// agent_dispatch tool so tracking + logging + audit live in one place. The run is registered
@@ -106,8 +117,9 @@ export default function (pi: ExtensionAPI): void {
 	// supplies the child's tools/model/system prompt — null fields fall back to buildSpawnArgv's
 	// defaults — and every child loads guardrails regardless. A persistence failure must never
 	// break the dispatch.
-	const dispatch = async (opts: { task: string; cwd: string; persona: Persona | null; ctx: ExtensionContext; continueSession?: boolean }): Promise<DispatchResult> => {
-		const { task, cwd, persona, ctx, continueSession = false } = opts;
+	const dispatch = async (opts: { task: string; persona: Persona | null; ctx: ExtensionContext; continueSession?: boolean }): Promise<DispatchResult> => {
+		const { task, persona, ctx, continueSession = false } = opts;
+		const cwd = ctx.cwd;
 		lastUiCtx = ctx;
 		const runId = defaultRunId();
 		const startedAt = Date.now();
@@ -187,13 +199,14 @@ export default function (pi: ExtensionAPI): void {
 			// Surface persona-load warnings (a malformed file is skipped, never silently dropped),
 			// mirroring the guardrails sibling's notify pattern, before resolving the dispatch.
 			const { personas, warnings } = loadPersonas(ctx.cwd);
+			lastPersonas = personas;
 			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
 			const { persona, task } = resolveDispatch(args, personas);
 			if (task === "") {
 				ctx.ui.notify(`[${LABEL}] usage: /${COMMAND} [persona] <task>`, "warning");
 				return;
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona, ctx });
+			const result = await dispatch({ task, persona, ctx });
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -209,13 +222,14 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			const { personas, warnings } = loadPersonas(ctx.cwd);
+			lastPersonas = personas;
 			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
 			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
 			if (!target.ok) {
 				ctx.ui.notify(`[${LABEL}] ${target.error}`, "warning");
 				return;
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, ctx, continueSession: true });
+			const result = await dispatch({ task, persona: target.persona, ctx, continueSession: true });
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -228,7 +242,7 @@ export default function (pi: ExtensionAPI): void {
 			task: Type.String({ description: "The task for the subagent to perform." }),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			const result = await dispatch({ task: params.task, cwd: ctx.cwd, persona: null, ctx });
+			const result = await dispatch({ task: params.task, persona: null, ctx });
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
 		},
 	});
@@ -243,11 +257,12 @@ export default function (pi: ExtensionAPI): void {
 		}),
 		execute: async (_toolCallId, { persona: name, task }, _signal, _onUpdate, ctx) => {
 			const { personas } = loadPersonas(ctx.cwd);
+			lastPersonas = personas;
 			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
 			if (!target.ok) {
 				return { content: [{ type: "text", text: target.error }], details: { ok: false, error: target.error } };
 			}
-			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, ctx, continueSession: true });
+			const result = await dispatch({ task, persona: target.persona, ctx, continueSession: true });
 			return { content: [{ type: "text", text: formatReply(task, result) }], details: result };
 		},
 	});
