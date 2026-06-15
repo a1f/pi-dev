@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildDashboardCards, columnsForWidth } from "./dashboard.ts";
+import { buildDashboardCards, columnsForWidth, renderDashboard } from "./dashboard.ts";
 import { cardFromRecord, DEFAULT_GRID_THEME, idleCard } from "./grid.ts";
 import type { GridTheme } from "./grid.ts";
 import type { Persona } from "./personas.ts";
@@ -83,4 +83,59 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 		idleCard(critic),
 		cardFromRecord(personaLess, now),
 	]);
+});
+
+test("renderDashboard packs cards into width-fitted rows and yields no lines when empty", () => {
+	// A small ascii theme makes the column math predictable: cardWidth 10 + the 2-column gutter
+	// is a 12-column stride, so a width of 24 fits two cards across and a width of 10 fits one.
+	const theme: GridTheme = {
+		glyph: { running: "R", done: "D", error: "E", killed: "K", idle: "I" },
+		barFilled: "#",
+		barEmpty: ".",
+		barWidth: 3,
+		cardWidth: 10,
+	};
+	const persona = (name: string): Persona => ({
+		name,
+		description: `${name} agent`,
+		tools: null,
+		model: null,
+		systemPrompt: "",
+		source: null,
+	});
+	const runningFor = (name: string): RunRecord => ({
+		runId: `${name}-1`,
+		task: `${name} task`,
+		persona: name,
+		status: "running",
+		startedAt: 0,
+		finishedAt: null,
+		// lastLine stays null so the only place a persona name can appear is its card title line.
+		state: { toolCount: 1, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0 },
+	});
+
+	const personas = [persona("alpha"), persona("bravo")];
+	const records = [runningFor("alpha"), runningFor("bravo")];
+	const now = 1_000;
+
+	// Two columns: both persona cards share the first row, so both titles land on the first line.
+	const wide = renderDashboard({ records, personas, now, width: 24, theme });
+	assert.ok(Array.isArray(wide), "renderDashboard returns an array of lines");
+	const firstLine = wide[0] ?? "";
+	assert.ok(
+		firstLine.includes("alpha") && firstLine.includes("bravo"),
+		`expected both persona titles side by side on the first line, got ${JSON.stringify(wide)}`,
+	);
+
+	// One column: the same two cards stack, so no single line carries both titles.
+	const narrow = renderDashboard({ records, personas, now, width: 10, theme });
+	const sharedLine = narrow.find((line) => line.includes("alpha") && line.includes("bravo"));
+	assert.equal(
+		sharedLine,
+		undefined,
+		`expected the two persona titles stacked on separate lines, got ${JSON.stringify(narrow)}`,
+	);
+
+	// Nothing to show: an empty array (not [""]) so the caller can clear the widget.
+	assert.deepEqual(renderDashboard({ records: [], personas: [], now: 0, width: 80 }), []);
 });

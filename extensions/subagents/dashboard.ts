@@ -4,7 +4,7 @@
 // footer can pick a column count before handing cards to grid.ts's renderGrid. Pure and
 // deterministic; the gutter is shared with the renderer so packing never drifts from layout.
 
-import { CARD_GUTTER, cardFromRecord, DEFAULT_GRID_THEME, idleCard } from "./grid.ts";
+import { CARD_GUTTER, cardFromRecord, DEFAULT_GRID_THEME, idleCard, renderGrid } from "./grid.ts";
 import type { GridCard, GridTheme } from "./grid.ts";
 import type { Persona } from "./personas.ts";
 import type { RunRecord } from "./registry.ts";
@@ -37,4 +37,23 @@ export function buildDashboardCards(opts: {
 	});
 	const looseCards = records.filter((record) => record.persona === null).map((record) => cardFromRecord(record, now));
 	return [...personaCards, ...looseCards];
+}
+
+/**
+ * Render the footer's cards into width-fitted rows of lines. Returns an empty array (not a blank
+ * line) when there is nothing to show, so the caller can clear the widget instead of printing a
+ * stray row; the theme defaults to DEFAULT_GRID_THEME consistently in the grid layer.
+ */
+export function renderDashboard(opts: {
+	records: readonly RunRecord[];
+	personas: readonly Persona[];
+	now: number;
+	width: number;
+	theme?: GridTheme;
+}): string[] {
+	const { records, personas, now, width, theme } = opts;
+	const cards = buildDashboardCards({ records, personas, now });
+	if (cards.length === 0) return [];
+	const columns = columnsForWidth(width, theme);
+	return renderGrid({ cards, columns, theme }).split("\n");
 }
