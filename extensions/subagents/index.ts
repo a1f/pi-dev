@@ -3,9 +3,11 @@
 // Thin pi adapter over the tested core (runner.ts → argv.ts/events.ts). Both the
 // `/agent` command (operator) and the `agent_dispatch` tool (the main agent) run a
 // read-only child via pi.exec and inject its answer back into the conversation as a
-// follow-up that triggers the parent's next turn.
+// follow-up that triggers the parent's next turn. A persona dispatch also persists its
+// conversation to a per-persona session file, so the `/agent-continue` command and
+// `agent_continue` tool can resume that persona in a fresh child for a follow-up turn.
 
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,16 +15,46 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
-import { loadPersonas, type Persona, resolveDispatch } from "./personas.ts";
+import { loadPersonas, type Persona, resolveDispatch, splitFirstToken } from "./personas.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
 import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
+import { sessionPathFor } from "./session.ts";
 
 // The guardrails extension is a sibling dir (extensions/guardrails), resolved from this file's
 // location so it is correct regardless of the parent session's cwd. Every spawned child loads it
 // explicitly: `--no-extensions` only disables discovery, so the safety net must be passed by path.
 const GUARDRAILS_EXTENSION = join(dirname(fileURLToPath(import.meta.url)), "..", "guardrails");
+
+/** Whether a path exists and is accessible — the continue precondition that a prior session file is present. */
+async function pathExists(path: string): Promise<boolean> {
+	try {
+		await access(path);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** A resolved continue request — the persona to resume — or a friendly reason it can't be resumed. */
+type ContinueTarget = { ok: true; persona: Persona } | { ok: false; error: string };
+
+/**
+ * Resolve a continue request to a persona whose session is on disk, or a friendly reason it
+ * can't resume: an unknown name, an unsafe name with no safe session path, or a persona that
+ * was never dispatched (no session file yet). Shared by the agent_continue tool and the
+ * /agent-continue command so both reject the same preconditions before any child is spawned.
+ */
+async function resolveContinueTarget(opts: { name: string; personas: readonly Persona[]; cwd: string }): Promise<ContinueTarget> {
+	const { name, personas, cwd } = opts;
+	const persona = personas.find((candidate) => candidate.name === name) ?? null;
+	if (persona === null) return { ok: false, error: `no persona named '${name}'` };
+	const session = sessionPathFor(cwd, persona.name);
+	if (session === null) return { ok: false, error: `persona '${name}' has an unsafe name and cannot resume a session` };
+	if (!(await pathExists(session))) return { ok: false, error: `no prior session for '${name}'; dispatch it first with /${COMMAND}` };
+	return { ok: true, persona };
+}
 
 export default function (pi: ExtensionAPI): void {
 	const exec: ExecLike = (command, args, options) => pi.exec(command, args, options);
@@ -45,13 +77,30 @@ export default function (pi: ExtensionAPI): void {
 	// supplies the child's tools/model/system prompt — null fields fall back to buildSpawnArgv's
 	// defaults — and every child loads guardrails regardless. A persistence failure must never
 	// break the dispatch.
-	const dispatch = async (task: string, cwd: string, persona: Persona | null): Promise<DispatchResult> => {
+	const dispatch = async (opts: { task: string; cwd: string; persona: Persona | null; continueSession?: boolean }): Promise<DispatchResult> => {
+		const { task, cwd, persona, continueSession = false } = opts;
 		const runId = defaultRunId();
 		const startedAt = Date.now();
 		// Wire kill to abort: registering onKill before the await keeps the in-flight run
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
 		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
+		// A persona owns one rolling per-persona session file: --session selects it and is what
+		// drives resumption, so the first dispatch starts the conversation and a later dispatch
+		// continues it. A persona-less dispatch stays session-free; an unsafe persona name yields
+		// a null path → run without a session.
+		const session = persona === null ? null : sessionPathFor(cwd, persona.name);
+		if (session !== null) {
+			// Defensively pre-create the sessions dir: pi mkdirs it under the default config, but a
+			// session-dir override (PI_CODING_AGENT_SESSION_DIR / --session-dir / settings.sessionDir)
+			// would not, and the first persist (openSync(path, "wx")) would then ENOENT and silently
+			// break resumption. Best-effort, mirroring the runs-dir create in writeLog.
+			try {
+				await mkdir(dirname(session), { recursive: true });
+			} catch {
+				// Swallow: a failed pre-create must never derail the dispatch; pi may still create it.
+			}
+		}
 		const result = await runAgent(task, exec, {
 			timeoutMs: DEFAULT_TIMEOUT_MS,
 			cwd,
@@ -63,8 +112,13 @@ export default function (pi: ExtensionAPI): void {
 			model: persona?.model ?? undefined,
 			// An empty/whitespace-only persona body trims to "" upstream; map it to undefined so
 			// buildSpawnArgv omits --system-prompt and the child keeps its default, rather than
-			// emitting `--system-prompt ""` and replacing that default with nothing.
+			// emitting `--system-prompt ""` and replacing that default with nothing. The continue
+			// path applies it too: pi rebuilds the system prompt from this flag at every start and
+			// never restores one from the session, so re-sending the persona prompt is required to
+			// keep the resumed turn in-persona — it is not duplicated into the conversation history.
 			systemPrompt: persona?.systemPrompt || undefined,
+			session: session ?? undefined,
+			continueSession,
 		});
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
 		if (result.runId !== null && result.logPath !== null) {
@@ -101,7 +155,29 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify(`[${LABEL}] usage: /${COMMAND} [persona] <task>`, "warning");
 				return;
 			}
-			const result = await dispatch(task, ctx.cwd, persona);
+			const result = await dispatch({ task, cwd: ctx.cwd, persona });
+			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
+		},
+	});
+
+	pi.registerCommand(CONTINUE_COMMAND, {
+		description: "Resume a persona subagent's prior session with a follow-up <task>; its answer is injected as a follow-up.",
+		handler: async (args, ctx) => {
+			// The first token names the persona to resume; the remainder is the follow-up task —
+			// the same `/agent [head] rest` grammar resolveDispatch uses, via shared splitFirstToken.
+			const { head: name, rest: task } = splitFirstToken(args);
+			if (name === "" || task === "") {
+				ctx.ui.notify(`[${LABEL}] usage: /${CONTINUE_COMMAND} <persona> <task>`, "warning");
+				return;
+			}
+			const { personas, warnings } = loadPersonas(ctx.cwd);
+			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
+			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
+			if (!target.ok) {
+				ctx.ui.notify(`[${LABEL}] ${target.error}`, "warning");
+				return;
+			}
+			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, continueSession: true });
 			pi.sendUserMessage(formatReply(task, result), { deliverAs: "followUp" });
 		},
 	});
@@ -114,8 +190,27 @@ export default function (pi: ExtensionAPI): void {
 			task: Type.String({ description: "The task for the subagent to perform." }),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			const result = await dispatch(params.task, ctx.cwd, null);
+			const result = await dispatch({ task: params.task, cwd: ctx.cwd, persona: null });
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: CONTINUE_TOOL,
+		label: "Continue subagent",
+		description: "Resume a persona subagent's prior session with a follow-up task, answered with the context of its first run.",
+		parameters: Type.Object({
+			persona: Type.String({ description: "The persona whose session to resume (it must have been dispatched before)." }),
+			task: Type.String({ description: "The follow-up task for the resumed subagent." }),
+		}),
+		execute: async (_toolCallId, { persona: name, task }, _signal, _onUpdate, ctx) => {
+			const { personas } = loadPersonas(ctx.cwd);
+			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
+			if (!target.ok) {
+				return { content: [{ type: "text", text: target.error }], details: { ok: false, error: target.error } };
+			}
+			const result = await dispatch({ task, cwd: ctx.cwd, persona: target.persona, continueSession: true });
+			return { content: [{ type: "text", text: formatReply(task, result) }], details: result };
 		},
 	});
 

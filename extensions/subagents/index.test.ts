@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, LOG_COMMAND, RUNS_DIR, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, CONTINUE_COMMAND, CONTINUE_TOOL, LOG_COMMAND, RUNS_DIR, SESSIONS_DIR, TOOL } from "./constants.ts";
 import subagents from "./index.ts";
 import { type SubagentRunAudit } from "./log.ts";
 import { type ExecLike, type ExecResultLike } from "./runner.ts";
@@ -47,6 +47,7 @@ interface AuditCall {
 interface FakePi {
 	commandHandler: CommandHandler | undefined;
 	logHandler: CommandHandler | undefined;
+	continueHandler: CommandHandler | undefined;
 	tool: ToolDef | undefined;
 	tools: ToolDef[];
 	execCalls: ExecCall[];
@@ -61,6 +62,7 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 	const fake: FakePi = {
 		commandHandler: undefined,
 		logHandler: undefined,
+		continueHandler: undefined,
 		tool: undefined,
 		tools: [],
 		execCalls: [],
@@ -73,6 +75,7 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 		registerCommand(name: string, options: { handler: CommandHandler }): void {
 			if (name === COMMAND) fake.commandHandler = options.handler;
 			else if (name === LOG_COMMAND) fake.logHandler = options.handler;
+			else if (name === CONTINUE_COMMAND) fake.continueHandler = options.handler;
 		},
 		registerTool(tool: ToolDef): void {
 			fake.tools.push(tool);
@@ -111,6 +114,13 @@ const writePersona = async (cwd: string, file: string, content: string): Promise
 	const agents = join(cwd, ".pi", "agents");
 	await mkdir(agents, { recursive: true });
 	await writeFile(join(agents, file), content, "utf8");
+};
+
+/** Plant a prior session file at <cwd>/.pi/sessions/<name>.jsonl so a continue's precondition is met. */
+const writeSession = async (cwd: string, name: string): Promise<void> => {
+	const sessions = join(cwd, SESSIONS_DIR);
+	await mkdir(sessions, { recursive: true });
+	await writeFile(join(sessions, `${name}.jsonl`), '{"type":"session_start"}\n', "utf8");
 };
 
 const fakeCtx = { cwd: "/tmp", ui: { notify() {} }, hasUI: false };
@@ -154,6 +164,43 @@ test("a named persona applies its tools and system prompt, and the child still l
 	assert.equal(flagValue(args, "--system-prompt"), "You are scout. Map the repository.", "the persona body becomes the child's system prompt");
 	const extension = flagValue(args, "--extension");
 	assert.ok(extension !== undefined && extension.endsWith("guardrails"), "every child must load the guardrails extension");
+});
+
+test("a persona /agent dispatch persists to its per-persona session file, fresh (no --continue)", async () => {
+	// A persona dispatch passes --session <cwd>/.pi/sessions/<name>.jsonl so a later /agent-continue
+	// can resume it; the first run is fresh, so it must NOT carry --continue.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\ntools:\n  - read\n---\nYou are scout.");
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.commandHandler("scout summarize the layout", ctx);
+
+	assert.equal(fake.execCalls.length, 1, "a persona dispatch must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	assert.equal(flagValue(args, "--session"), join(dir, ".pi", "sessions", "scout.jsonl"), "a persona dispatch must persist to its per-persona session file");
+	assert.equal(args.indexOf("--continue"), -1, "a fresh persona dispatch must not carry the explicit-continue marker");
+});
+
+test("a persona /agent dispatch creates the per-persona sessions directory before launching", async () => {
+	// pi mkdirs the session file's own dir under the default config, but a session-dir override
+	// (PI_CODING_AGENT_SESSION_DIR / --session-dir / settings.sessionDir) would leave
+	// <cwd>/.pi/sessions absent and the first persist would ENOENT; the extension creates it
+	// defensively (best-effort, mirroring the runs dir) so resumption never silently breaks.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\n---\nYou are scout.");
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.commandHandler("scout map the repo", ctx);
+
+	assert.ok(existsSync(join(dir, SESSIONS_DIR)), "a persona dispatch must create its sessions directory so the first persist can land");
 });
 
 test("a plain dispatch (no persona) still loads guardrails and runs with the default read-only tools", async () => {
@@ -463,4 +510,165 @@ test("agent_kill aborts the in-flight child and the run stays killed after a lat
 	const finalRun = statusRuns(afterReturn)[0];
 	assert.ok(finalRun);
 	assert.equal(finalRun.status, "killed", "a late completion must not overwrite a killed run");
+});
+
+/** A tool ctx rooted at a real temp dir, so loadPersonas and the session precondition read real files. */
+const continueToolCtx = (cwd: string): ToolCtx => ({ cwd, ui: { notify() {} }, hasUI: false }) as unknown as ToolCtx;
+
+test("agent_continue resumes a persona's session with --session --continue and its tools, and re-applies the persona's system prompt", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
+	assert.ok(continueTool, "the extension must register the agent_continue tool");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\ntools:\n  - read\n  - grep\n  - find\n---\nYou are scout.");
+	await writeSession(dir, "scout"); // a prior dispatch left a session to resume
+
+	const result = await continueTool.execute("id", { persona: "scout", task: "now check the tests" }, undefined, undefined, continueToolCtx(dir));
+
+	assert.equal(fake.execCalls.length, 1, "a resume must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	assert.equal(flagValue(args, "--session"), join(dir, ".pi", "sessions", "scout.jsonl"), "the resumed child must use the persona's session file");
+	assert.ok(args.includes("--continue"), "the resumed child must continue the prior session");
+	assert.equal(flagValue(args, "--tools"), "read,grep,find", "the resumed child keeps the persona's tools");
+	const extension = flagValue(args, "--extension");
+	assert.ok(extension !== undefined && extension.endsWith("guardrails"), "the resumed child must still load guardrails");
+	assert.equal(flagValue(args, "--system-prompt"), "You are scout.", "pi rebuilds the system prompt from the flag at every start and never restores it from the session, so the persona prompt must be re-applied on continue");
+	const block = result.content[0];
+	assert.ok(block && block.type === "text" && block.text.includes(ANSWER), "the tool must return the resumed subagent's answer");
+});
+
+test("agent_continue for an unknown persona returns a friendly error and does not spawn", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
+	assert.ok(continueTool, "the extension must register the agent_continue tool");
+
+	const dir = await tempCwd(); // no personas at all
+
+	const result = await continueTool.execute("id", { persona: "ghost", task: "do it" }, undefined, undefined, continueToolCtx(dir));
+
+	assert.equal(fake.execCalls.length, 0, "an unknown persona must not spawn a child");
+	const block = result.content[0];
+	assert.ok(block && block.type === "text" && /ghost/.test(block.text), "the error must name the unknown persona");
+	assert.ok(block && block.type === "text" && !block.text.includes(ANSWER), "an unknown persona must not read as a successful run");
+});
+
+test("agent_continue for a persona with no prior session returns a friendly error and does not spawn", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
+	assert.ok(continueTool, "the extension must register the agent_continue tool");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\n---\nYou are scout.");
+	// No writeSession: the persona exists but was never dispatched, so there is nothing to resume.
+
+	const result = await continueTool.execute("id", { persona: "scout", task: "do it" }, undefined, undefined, continueToolCtx(dir));
+
+	assert.equal(fake.execCalls.length, 0, "a persona with no prior session must not spawn a child");
+	const block = result.content[0];
+	assert.ok(block && block.type === "text" && /no prior session/i.test(block.text), "the error must explain there is no prior session to resume");
+	assert.ok(block && block.type === "text" && !block.text.includes(ANSWER), "a missing session must not read as a successful run");
+});
+
+test("a persona with an unsafe name dispatches with no --session flag (its name can't be a safe path segment)", async () => {
+	// A persona name is operator-authored and parsePersona only requires it non-empty, so a name
+	// like "a/b" is reachable. sessionPathFor returns null for it, so dispatch's null sub-case must
+	// run the child WITHOUT a --session flag rather than letting the name escape the sessions dir.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	// The FILE name is safe (weird.md); only the frontmatter name "a/b" is path-unsafe.
+	await writePersona(dir, "weird.md", "---\nname: a/b\ndescription: An oddly named persona.\ntools:\n  - read\n---\nYou are weird.");
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.commandHandler("a/b map the repo", ctx);
+
+	assert.equal(fake.execCalls.length, 1, "the unsafe-named persona must still dispatch a child");
+	const args = fake.execCalls[0]?.args ?? [];
+	assert.equal(args.indexOf("--session"), -1, "an unsafe persona name must dispatch with no --session flag");
+	// Tools still apply, proving this is the persona path (session null), not the no-persona path.
+	assert.equal(flagValue(args, "--tools"), "read", "the unsafe-named persona's own tools still reach the child");
+});
+
+test("agent_continue for a persona with an unsafe name returns the unsafe-name error and does not spawn", async () => {
+	// resolveContinueTarget finds the persona by name, but sessionPathFor returns null for an unsafe
+	// name, so the continue must reject with the unsafe-name error before any child is spawned.
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	const continueTool = fake.tools.find((t) => t.name === CONTINUE_TOOL);
+	assert.ok(continueTool, "the extension must register the agent_continue tool");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "weird.md", "---\nname: a/b\ndescription: An oddly named persona.\n---\nYou are weird.");
+
+	const result = await continueTool.execute("id", { persona: "a/b", task: "do it" }, undefined, undefined, continueToolCtx(dir));
+
+	assert.equal(fake.execCalls.length, 0, "an unsafe persona name must not spawn a child");
+	const block = result.content[0];
+	assert.ok(block && block.type === "text" && /unsafe name/i.test(block.text), "the error must explain the persona's name is unsafe");
+	assert.ok(block && block.type === "text" && !block.text.includes(ANSWER), "an unsafe name must not read as a successful run");
+});
+
+test("/agent-continue resumes a persona's session and injects the answer as a follow-up", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.continueHandler, "the extension must register the agent-continue command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\ntools:\n  - read\n---\nYou are scout.");
+	await writeSession(dir, "scout");
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+
+	await fake.continueHandler("scout now check the tests", ctx);
+
+	assert.equal(fake.execCalls.length, 1, "the command must resume exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	assert.equal(flagValue(args, "--session"), join(dir, ".pi", "sessions", "scout.jsonl"), "the command must resume the persona's session file");
+	assert.ok(args.includes("--continue"), "the command must continue the prior session");
+	assert.equal(fake.sent.length, 1, "the resumed answer must be injected once");
+	const sent = fake.sent[0];
+	assert.ok(sent, "a follow-up message must be delivered");
+	assert.ok(typeof sent.content === "string" && sent.content.includes(ANSWER), "the follow-up must carry the resumed subagent's answer");
+	assert.equal(sent.options?.deliverAs, "followUp");
+});
+
+test("/agent-continue for a persona with no prior session notifies and does not spawn", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.continueHandler, "the extension must register the agent-continue command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\n---\nYou are scout.");
+	// No writeSession: scout was never dispatched, so there is no session to resume.
+	const notes: Note[] = [];
+
+	await fake.continueHandler("scout follow up", notifyingCtx(dir, notes));
+
+	assert.equal(fake.execCalls.length, 0, "a missing prior session must not spawn a child");
+	assert.equal(fake.sent.length, 0, "a missing prior session must not inject a follow-up");
+	const warning = notes.find((note) => note.level === "warning" && /no prior session/i.test(note.msg));
+	assert.ok(warning, "the operator must be told there is no prior session to resume");
+});
+
+test("/agent-continue without a follow-up task notifies usage and does not resume", async () => {
+	const fake = makeFakePi();
+	subagents(fake.pi);
+	assert.ok(fake.continueHandler, "the extension must register the agent-continue command");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\n---\nYou are scout.");
+	await writeSession(dir, "scout"); // a resumable session exists, so only the missing task should stop it
+	const notes: Note[] = [];
+
+	await fake.continueHandler("scout", notifyingCtx(dir, notes));
+
+	assert.equal(fake.execCalls.length, 0, "a bare persona name with no task must not resume a child");
+	assert.equal(fake.sent.length, 0, "a usage error must not inject a follow-up");
+	const usage = notes.find((note) => note.level === "warning" && /usage/i.test(note.msg));
+	assert.ok(usage, "a missing follow-up task must notify the command's usage");
 });

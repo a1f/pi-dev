@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { PERSONA_ERRORS } from "./constants.ts";
-import { loadPersonas, parsePersona, resolveDispatch } from "./personas.ts";
+import { loadPersonas, parsePersona, resolveDispatch, splitFirstToken } from "./personas.ts";
 
 // loadPersonas scans <cwd>/.pi/agents; the fixtures provide a small workspace whose
 // .pi/agents directory holds two valid personas and one malformed file.
@@ -76,6 +76,17 @@ test("parsePersona reports invalid input as an error naming the cause, without t
 
 	// Our explicit choice: a non-string `model` is an error, not silently ignored.
 	assert.equal(expectError(parsePersona("---\nname: x\ndescription: y\nmodel:\n  - a\n---\nbody")), PERSONA_ERRORS.badModel);
+});
+
+test("splitFirstToken splits the leading whitespace token from the trimmed remainder", () => {
+	// Surrounding and interior whitespace collapses: head is the first token, rest is the trimmed tail.
+	assert.deepEqual(splitFirstToken("  scout  map the repo "), { head: "scout", rest: "map the repo" });
+	// A bare single token has no remainder.
+	assert.deepEqual(splitFirstToken("scout"), { head: "scout", rest: "" });
+	// All-whitespace input yields an empty head (the caller treats that as a usage error).
+	assert.deepEqual(splitFirstToken("   "), { head: "", rest: "" });
+	// A head may contain a path separator (e.g. an unsafe persona name); it is still a single token.
+	assert.deepEqual(splitFirstToken("a/b do it"), { head: "a/b", rest: "do it" });
 });
 
 test("resolveDispatch matches the first token to a persona name and returns the remainder as the task", () => {
