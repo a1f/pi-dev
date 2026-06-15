@@ -13,6 +13,9 @@ export const LOG_COMMAND = "agent-log";
 /** Per-run JSONL logs land here, relative to the project cwd. */
 export const RUNS_DIR = ".pi/runs";
 
+/** Pidfile tracking in-flight child pids for cross-session orphan cleanup; deliberately outside `.pi/runs/` so it never collides with /agent-log's latest-`.jsonl` pick. */
+export const INFLIGHT_FILE = ".pi/agent-inflight.jsonl";
+
 /** Custom entry type for the per-run audit record persisted via pi.appendEntry. */
 export const AUDIT_TYPE = "subagent_run";
 
@@ -21,8 +24,9 @@ export const TAIL_LINES = 20;
 
 /**
  * Default per-dispatch wall-clock cap (ms) handed to pi.exec, which SIGTERM→SIGKILLs
- * a child that overruns. This is only a hung-child guard; full timeout/escalation,
- * concurrency, and orphan cleanup are a later PR (slice 7).
+ * a child that overruns. This is the hung-child guard; timeout escalation and orphan
+ * cleanup now ship in slice 7.1, while a concurrency cap and FIFO queue remain a later
+ * PR (7.2).
  */
 export const DEFAULT_TIMEOUT_MS = 120_000;
 

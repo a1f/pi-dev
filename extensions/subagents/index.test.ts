@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,9 +8,10 @@ import { fileURLToPath } from "node:url";
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, LOG_COMMAND, RUNS_DIR, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, INFLIGHT_FILE, LOG_COMMAND, RUNS_DIR, TOOL } from "./constants.ts";
 import subagents from "./index.ts";
 import { type SubagentRunAudit } from "./log.ts";
+import { parseInflight } from "./orphans.ts";
 import { type ExecLike, type ExecResultLike } from "./runner.ts";
 import { type SpawnExec } from "./spawn.ts";
 
@@ -469,4 +470,44 @@ test("agent_kill aborts the in-flight child and the run stays killed after a lat
 	const finalRun = statusRuns(afterReturn)[0];
 	assert.ok(finalRun);
 	assert.equal(finalRun.status, "killed", "a late completion must not overwrite a killed run");
+});
+
+test("a dispatch records its child's pid in the in-flight pidfile while running and removes it on completion", async () => {
+	// Orphan cleanup needs each live child persisted to a pidfile so a later session can reap
+	// children a dead session left behind. Hold the child's exec open with a deferred so the run is
+	// observably mid-flight, and fire onSpawn with a known pid the way the real spawn wrapper does;
+	// the shared fake exec never calls onSpawn, so this test injects its own.
+	const childPid = 4242;
+	let settleExec!: (result: ExecResultLike) => void;
+	const pendingExec = new Promise<ExecResultLike>((resolve) => {
+		settleExec = resolve;
+	});
+	const exec: SpawnExec = (_command, _args, options) => {
+		options?.onSpawn?.(childPid);
+		return pendingExec;
+	};
+	const fake = makeFakePi();
+	subagents(fake.pi, { exec });
+	assert.ok(fake.commandHandler, "the extension must register the agent command");
+
+	const dir = await tempCwd();
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as CommandCtx;
+	const inflightPath = join(dir, INFLIGHT_FILE);
+	// Read the pidfile, treating an absent file as no records, so each lifecycle check fails on a
+	// missing record rather than on an ENOENT throw.
+	const readInflight = () => parseInflight(existsSync(inflightPath) ? readFileSync(inflightPath, "utf8") : "");
+
+	// Start the dispatch but leave exec pending: the adapter records the pid synchronously at spawn,
+	// so the pidfile already names the running child before we let the run finish.
+	const dispatched = fake.commandHandler("scout repo", ctx);
+
+	const running = readInflight().find((record) => record.pid === childPid);
+	assert.ok(running, "the running child's pid must be recorded in the in-flight pidfile");
+	assert.ok(running.runId.length > 0, "the in-flight record must carry a non-empty run id");
+
+	// Let the child exit cleanly, then let the dispatch settle.
+	settleExec({ stdout: happyStream, stderr: "", code: 0, killed: false });
+	await dispatched;
+
+	assert.ok(!readInflight().some((record) => record.pid === childPid), "a completed run's pid must be removed from the in-flight pidfile");
 });

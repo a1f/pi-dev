@@ -6,6 +6,7 @@
 // inject its answer back into the conversation as a follow-up that triggers the
 // parent's next turn.
 
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,8 +15,9 @@ import { Type } from "typebox";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
+import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, INFLIGHT_FILE, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
+import { type InflightRecord, parseInflight, serializeInflight } from "./orphans.ts";
 import { loadPersonas, type Persona, resolveDispatch } from "./personas.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
 import { defaultRunId, formatReply, runAgent, type DispatchResult, type LogWriter } from "./runner.ts";
@@ -30,6 +32,31 @@ const GUARDRAILS_EXTENSION = join(dirname(fileURLToPath(import.meta.url)), "..",
 export interface SubagentDeps {
 	/** The child runner, injected so tests fake the child and later slices can wrap it to capture the child's pid. */
 	exec?: SpawnExec;
+}
+
+// The pidfile's imperative shell: record/remove are synchronous so the pid persists before any
+// crash window and is gone the instant a run ends; the JSONL format itself lives in orphans.ts.
+
+/** Persist a live child's pid at spawn so a crashed session's orphans stay reapable; synchronous and best-effort so the pid lands before any crash window and tracking never breaks a dispatch. */
+function recordInflight(cwd: string, record: InflightRecord): void {
+	const path = join(cwd, INFLIGHT_FILE);
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		appendFileSync(path, serializeInflight([record]), "utf8");
+	} catch {
+		// Swallow: pidfile tracking is best-effort and must never break a dispatch.
+	}
+}
+
+/** Drop a finished run from the pidfile so it is never mistaken for an orphan, treating a missing file as a no-op so completion never throws. */
+function removeInflight(cwd: string, runId: string): void {
+	const path = join(cwd, INFLIGHT_FILE);
+	try {
+		const remaining = parseInflight(readFileSync(path, "utf8")).filter((record) => record.runId !== runId);
+		writeFileSync(path, serializeInflight(remaining), "utf8");
+	} catch {
+		// Swallow: a missing pidfile (or write failure) on remove is a no-op.
+	}
 }
 
 export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
@@ -60,7 +87,11 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 		// observable as running, and aborting the controller cancels the child's exec.
 		const controller = new AbortController();
 		registry.register({ runId, task, startedAt, onKill: () => controller.abort() });
-		const result = await runAgent(task, exec, {
+		// Wrap the injected exec to record this child's pid in the pidfile the instant it spawns:
+		// runAgent only forwards {timeout,signal,cwd}, so the onSpawn hook lives in this wrapper.
+		const trackedExec: SpawnExec = (command, args, options) =>
+			exec(command, args, { ...options, onSpawn: (pid) => recordInflight(cwd, { runId, pid, startedAt }) });
+		const result = await runAgent(task, trackedExec, {
 			timeoutMs: DEFAULT_TIMEOUT_MS,
 			cwd,
 			writeLog,
@@ -75,6 +106,8 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 			systemPrompt: persona?.systemPrompt || undefined,
 		});
 		registry.finish({ runId, status: result.ok ? "done" : "error", state: result.state, finishedAt: Date.now() });
+		// The child is no longer in flight, so drop its pidfile record before the (best-effort) audit.
+		removeInflight(cwd, runId);
 		if (result.runId !== null && result.logPath !== null) {
 			// Project the run outcome onto the persisted audit shape; the annotation keeps
 			// this literal pinned to SubagentRunAudit (the single source of the record's shape).
