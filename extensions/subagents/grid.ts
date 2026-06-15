@@ -101,8 +101,9 @@ function fit(content: string, width: number): string {
 /** Lines every card occupies — the cards in a row are zipped this many lines deep. */
 const CARD_HEIGHT = 3;
 
-/** Blank columns between adjacent cards in a row. */
-const GUTTER = "  ";
+/** Blank columns between adjacent cards in a row. Exported so layout math (columnsForWidth) packs cards with the exact gutter the renderer draws. */
+export const CARD_GUTTER = 2;
+const GUTTER = " ".repeat(CARD_GUTTER);
 
 /** The fixed lines of one card: title, metrics + bar, last output line. */
 function cardLines(card: GridCard, theme: GridTheme): readonly string[] {
