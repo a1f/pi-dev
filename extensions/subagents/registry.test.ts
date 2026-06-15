@@ -181,3 +181,26 @@ test("start flips a queued run to running once, restamping its start time, and i
 	// Starting an unknown run changes nothing.
 	assert.equal(reg.start({ runId: "nope", startedAt: 1 }), false);
 });
+
+test("kill cancels a queued run, firing its onKill hook, so a run killed while queued never starts", () => {
+	const reg = new RunRegistry();
+
+	let killed = false;
+	reg.register({
+		runId: "q1",
+		task: "scout repo",
+		startedAt: 1000,
+		status: "queued",
+		onKill: () => {
+			killed = true;
+		},
+	});
+
+	assert.equal(reg.kill("q1"), true);
+	assert.equal(killed, true);
+	assert.equal(reg.get("q1")?.status, "killed");
+
+	// A run killed while waiting in the queue must never spawn: a later slot acquisition is a no-op.
+	assert.equal(reg.start({ runId: "q1", startedAt: 5000 }), false);
+	assert.equal(reg.get("q1")?.status, "killed");
+});

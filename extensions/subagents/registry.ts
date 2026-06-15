@@ -77,10 +77,10 @@ export class RunRegistry {
 		record.finishedAt = finishedAt;
 	}
 
-	/** Cancel a still-running run, firing its onKill hook; unknown or already-terminal runId is a no-op returning false. */
+	/** Cancel a running or queued run, firing its onKill hook; unknown or already-terminal runId is a no-op returning false. */
 	kill(runId: string): boolean {
 		const record = this.#records.get(runId);
-		if (record === undefined || record.status !== "running") return false;
+		if (record === undefined || (record.status !== "running" && record.status !== "queued")) return false;
 		this.#onKill.get(runId)?.();
 		record.status = "killed";
 		return true;
