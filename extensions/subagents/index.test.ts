@@ -552,3 +552,31 @@ test("on startup, session_start force-kills only the live orphan and clears the 
 	const remaining = parseInflight(existsSync(inflightPath) ? readFileSync(inflightPath, "utf8") : "");
 	assert.equal(remaining.length, 0, "the pidfile must be cleared once startup orphans are reaped");
 });
+
+test("on a non-startup session_start, the live session's own in-flight child survives and the pidfile is left intact", async () => {
+	// session_start also fires mid-session ("reload", "new", "resume", "fork"), when the pidfile
+	// records THIS live session's own in-flight children. Reaping then would force-kill a running
+	// child, so reaping must be restricted to a fresh "startup": a "reload" must touch neither the
+	// live child nor its pidfile record. The seeded record stands in for that own in-flight child.
+	const liveChild: InflightRecord = { runId: "live-run", pid: 6001, startedAt: 1 };
+
+	const dir = await tempCwd();
+	const inflightPath = join(dir, INFLIGHT_FILE);
+	await mkdir(dirname(inflightPath), { recursive: true });
+	writeFileSync(inflightPath, serializeInflight([liveChild]), "utf8");
+
+	const killed: number[] = [];
+	const fake = makeFakePi();
+	subagents(fake.pi, {
+		processAlive: () => true,
+		killProcess: (pid: number) => killed.push(pid),
+	});
+	assert.ok(fake.sessionStartHandler, "the extension must register a session_start handler");
+
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as SessionStartCtx;
+	await fake.sessionStartHandler({ type: "session_start", reason: "reload" }, ctx);
+
+	assert.deepEqual(killed, [], "a non-startup session_start must not reap the live session's own in-flight child");
+	const remaining = parseInflight(existsSync(inflightPath) ? readFileSync(inflightPath, "utf8") : "");
+	assert.deepEqual(remaining, [liveChild], "a non-startup session_start must leave the pidfile record untouched");
+});

@@ -166,7 +166,11 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	// none of those runs belong to this new session and session_start fires before any new dispatch.
 	// Best-effort and fully swallowed — a missing/unreadable pidfile is nothing to do, and reaping
 	// must never break session start.
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
+		// "reload"/"new"/"resume"/"fork" fire within a live session whose own in-flight children are in
+		// the pidfile — reaping then would kill them; only a fresh "startup" implies the prior recorded
+		// children are orphans of a dead process.
+		if (event.reason !== "startup") return;
 		try {
 			const path = join(ctx.cwd, INFLIGHT_FILE);
 			const records = parseInflight(readFileSync(path, "utf8"));
