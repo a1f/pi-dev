@@ -407,13 +407,13 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	pi.registerTool({
 		name: KILL_TOOL,
 		label: "Kill subagent",
-		description: "Abort a still-running dispatched subagent by run id.",
+		description: "Abort a running or queued dispatched subagent by run id.",
 		parameters: Type.Object({
 			runId: Type.String({ description: "The run id of the subagent to kill, as reported by agent_status." }),
 		}),
 		execute: async (_toolCallId, { runId }, _signal, _onUpdate, _ctx) => {
 			const killed = registry.kill(runId);
-			const text = killed ? `Killed subagent run ${runId}.` : `No running subagent with run id ${runId}.`;
+			const text = killed ? `Killed subagent run ${runId}.` : `No running or queued subagent with run id ${runId}.`;
 			return { content: [{ type: "text", text }], details: { killed } };
 		},
 	});
