@@ -4,6 +4,8 @@
 // format, tail rendering, and "latest run" selection stay unit-testable. The fs
 // writer is injected into runner.ts and the real fs reads live in index.ts.
 
+import { isSafePathSegment } from "./paths.ts";
+
 /** Everything needed to render a run's JSONL log file. */
 export interface RunLogInput {
 	runId: string;
@@ -59,10 +61,11 @@ export interface SubagentRunAudit {
 /**
  * Whether a runId is safe to embed in a filesystem path. runId is a public option,
  * so a value with a path separator or `..` could escape RUNS_DIR; the writer skips
- * an unsafe id rather than letting it traverse out.
+ * an unsafe id rather than letting it traverse out. Delegates to the shared segment
+ * guard so the runId and persona-name checks can never drift apart.
  */
 export function isSafeRunId(runId: string): boolean {
-	return /^[A-Za-z0-9._-]+$/.test(runId) && !runId.includes("..");
+	return isSafePathSegment(runId);
 }
 
 /** The log filename for a run (runId is timestamp-prefixed for lexical = chronological order). */

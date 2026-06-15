@@ -59,6 +59,36 @@ test("explicit extensions each emit --extension and still keep --no-extensions (
 	]);
 });
 
+test("a session path emits --session, and --continue is added only when continueSession is set", () => {
+	// A continue dispatch resumes a persona's session: --session <path> --continue, placed in
+	// the session slot right after --mode json (before model/system-prompt/no-extensions).
+	assert.deepEqual(buildSpawnArgv({ task: "follow up", session: "/work/.pi/sessions/scout.jsonl", continueSession: true }), [
+		"--mode",
+		"json",
+		"--session",
+		"/work/.pi/sessions/scout.jsonl",
+		"--continue",
+		"--no-extensions",
+		"--tools",
+		"read,grep,find,ls",
+		"-p",
+		"follow up",
+	]);
+
+	// A fresh persona dispatch emits --session with no --continue: the argv carries the session flag but not the explicit-continue marker.
+	assert.deepEqual(buildSpawnArgv({ task: "summarize", session: "/work/.pi/sessions/scout.jsonl" }), [
+		"--mode",
+		"json",
+		"--session",
+		"/work/.pi/sessions/scout.jsonl",
+		"--no-extensions",
+		"--tools",
+		"read,grep,find,ls",
+		"-p",
+		"summarize",
+	]);
+});
+
 test("a task beginning with '-' is rejected (pi would read it as a flag, not the prompt)", () => {
 	assert.throws(() => buildSpawnArgv({ task: "-v" }), /-v/);
 });

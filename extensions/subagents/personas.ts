@@ -58,18 +58,29 @@ export function parsePersona(content: string, source?: string): { persona: Perso
 }
 
 /**
+ * Split a `/agent` argument string into its leading whitespace-delimited token and the trimmed
+ * remainder — the one place the `/agent [head] rest` grammar lives, shared by resolveDispatch
+ * (persona + task) and the /agent-continue handler (persona + follow-up). `head` is "" only for
+ * an all-whitespace input; `rest` is "" when the input is a bare single token.
+ */
+export function splitFirstToken(args: string): { head: string; rest: string } {
+	const trimmed = args.trim();
+	const space = trimmed.search(/\s/);
+	if (space === -1) return { head: trimmed, rest: "" };
+	return { head: trimmed.slice(0, space), rest: trimmed.slice(space + 1).trim() };
+}
+
+/**
  * Resolve a `/agent` argument string into a persona + task. The first whitespace-delimited
  * token selects a persona by exact name and the trimmed remainder becomes the task; an
  * unrecognized first token means no persona, so the whole trimmed string is the task. A bare
  * persona name leaves the task empty for the caller to reject as a usage error.
  */
 export function resolveDispatch(args: string, personas: readonly Persona[]): { persona: Persona | null; task: string } {
-	const trimmed = args.trim();
-	const space = trimmed.search(/\s/);
-	const name = space === -1 ? trimmed : trimmed.slice(0, space);
-	const persona = personas.find((candidate) => candidate.name === name) ?? null;
-	if (persona === null) return { persona: null, task: trimmed };
-	return { persona, task: space === -1 ? "" : trimmed.slice(space + 1).trim() };
+	const { head, rest } = splitFirstToken(args);
+	const persona = personas.find((candidate) => candidate.name === head) ?? null;
+	if (persona === null) return { persona: null, task: args.trim() };
+	return { persona, task: rest };
 }
 
 /**

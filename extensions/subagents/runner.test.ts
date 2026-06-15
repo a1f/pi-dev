@@ -56,6 +56,30 @@ test("runAgent forwards tools, model, system prompt and extensions into the spaw
 	);
 });
 
+test("runAgent forwards session and continueSession into the spawned argv", async () => {
+	// The adapter resumes a persona by passing its session path and the continue flag through
+	// runAgent; the argv handed to exec must carry both, deep-equal to buildSpawnArgv's contract.
+	const calls: { command: string; args: string[] }[] = [];
+	const fakeExec: ExecLike = async (command, args) => {
+		calls.push({ command, args });
+		return { stdout: readFixture("summarize-readme.jsonl"), stderr: "", code: 0, killed: false };
+	};
+
+	await runAgent("follow up", fakeExec, {
+		tools: ["read", "grep"],
+		model: "opus",
+		extensions: ["/abs/guardrails"],
+		session: "/work/.pi/sessions/scout.jsonl",
+		continueSession: true,
+	});
+
+	assert.equal(calls.length, 1);
+	assert.deepEqual(
+		calls[0]?.args,
+		buildSpawnArgv({ task: "follow up", tools: ["read", "grep"], model: "opus", extensions: ["/abs/guardrails"], session: "/work/.pi/sessions/scout.jsonl", continueSession: true }),
+	);
+});
+
 test("runAgent writes the formatted run log via the injected writer at the expected path", async () => {
 	const writes: { logPath: string; content: string }[] = [];
 	const writeLog: LogWriter = async (logPath, content) => {
