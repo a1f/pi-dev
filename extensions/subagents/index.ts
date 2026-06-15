@@ -2,8 +2,9 @@
 //
 // Thin pi adapter over the tested core (runner.ts → argv.ts/events.ts). Both the
 // `/agent` command (operator) and the `agent_dispatch` tool (the main agent) run a
-// read-only child via pi.exec and inject its answer back into the conversation as a
-// follow-up that triggers the parent's next turn.
+// read-only child via an injectable exec (the in-repo spawn wrapper by default) and
+// inject its answer back into the conversation as a follow-up that triggers the
+// parent's next turn.
 
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -17,15 +18,22 @@ import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, KILL_TOOL, LABEL, LOG_COMMAND,
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
 import { loadPersonas, type Persona, resolveDispatch } from "./personas.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
-import { defaultRunId, formatReply, runAgent, type DispatchResult, type ExecLike, type LogWriter } from "./runner.ts";
+import { defaultRunId, formatReply, runAgent, type DispatchResult, type LogWriter } from "./runner.ts";
+import { defaultSpawnDeps, makeSpawnExec, type SpawnExec } from "./spawn.ts";
 
 // The guardrails extension is a sibling dir (extensions/guardrails), resolved from this file's
 // location so it is correct regardless of the parent session's cwd. Every spawned child loads it
 // explicitly: `--no-extensions` only disables discovery, so the safety net must be passed by path.
 const GUARDRAILS_EXTENSION = join(dirname(fileURLToPath(import.meta.url)), "..", "guardrails");
 
-export default function (pi: ExtensionAPI): void {
-	const exec: ExecLike = (command, args, options) => pi.exec(command, args, options);
+/** Injectable runner deps for the subagent extension, kept extensible as later slices add more optional deps. */
+export interface SubagentDeps {
+	/** The child runner, injected so tests fake the child and later slices can wrap it to capture the child's pid. */
+	exec?: SpawnExec;
+}
+
+export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
+	const exec: SpawnExec = deps.exec ?? makeSpawnExec(defaultSpawnDeps);
 
 	// The real log writer: the only fs in the dispatch path. Injected into runAgent,
 	// which keeps logging best-effort and swallows any failure here.

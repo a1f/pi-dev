@@ -12,10 +12,11 @@ import { AUDIT_TYPE, COMMAND, LOG_COMMAND, RUNS_DIR, TOOL } from "./constants.ts
 import subagents from "./index.ts";
 import { type SubagentRunAudit } from "./log.ts";
 import { type ExecLike, type ExecResultLike } from "./runner.ts";
+import { type SpawnExec } from "./spawn.ts";
 
 // Drive the real extension default export against a fake pi so the inject-link
-// is exercised end to end: the command handler must run runAgent over pi.exec,
-// then deliver the formatted answer back through pi.sendUserMessage. The exec
+// is exercised end to end: the command handler must run runAgent over the injected
+// exec, then deliver the formatted answer back through pi.sendUserMessage. The exec
 // fake returns the shared happy-path fixture instead of spawning a real child.
 const here = dirname(fileURLToPath(import.meta.url));
 const happyStream = readFileSync(join(here, "fixtures", "summarize-readme.jsonl"), "utf8");
@@ -26,12 +27,12 @@ type ToolDef = Parameters<ExtensionAPI["registerTool"]>[0];
 type CommandCtx = Parameters<CommandHandler>[1];
 type ToolCtx = Parameters<ToolDef["execute"]>[4];
 
-/** The options pi.exec received, including the AbortSignal a kill aborts the child with. */
+/** The options the injected exec received, including the AbortSignal a kill aborts the child with. */
 type ExecOptions = NonNullable<Parameters<ExecLike>[2]>;
 
 interface ExecCall {
 	command: string;
-	args: string[];
+	args: readonly string[];
 	options: ExecOptions | undefined;
 }
 interface SentMessage {
@@ -49,6 +50,8 @@ interface FakePi {
 	logHandler: CommandHandler | undefined;
 	tool: ToolDef | undefined;
 	tools: ToolDef[];
+	/** The injected child runner passed to subagents as deps.exec; records into execCalls. */
+	exec: SpawnExec;
 	execCalls: ExecCall[];
 	sent: SentMessage[];
 	audits: AuditCall[];
@@ -58,12 +61,21 @@ interface FakePi {
 }
 
 function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
+	const execCalls: ExecCall[] = [];
+	// The injected child runner: it records each call into execCalls, then — so a test can
+	// supply its own exec (e.g. a deferred) to observe a run mid-flight — replays that
+	// deferred when given one, else resolves immediately with the shared happy-path fixture.
+	const exec: SpawnExec = (command, args, options) => {
+		execCalls.push({ command, args, options });
+		return respondExec !== undefined ? respondExec() : Promise.resolve({ stdout: happyStream, stderr: "", code: 0, killed: false });
+	};
 	const fake: FakePi = {
 		commandHandler: undefined,
 		logHandler: undefined,
 		tool: undefined,
 		tools: [],
-		execCalls: [],
+		exec,
+		execCalls,
 		sent: [],
 		audits: [],
 		appendThrows: false,
@@ -80,12 +92,6 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 			// (e.g. agent_status) never shifts what the agent_dispatch tests reach.
 			if (tool.name === TOOL) fake.tool = tool;
 		},
-		exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResultLike> {
-			fake.execCalls.push({ command, args, options });
-			// A test may inject its own exec (e.g. a deferred) to observe a run mid-flight;
-			// the default resolves immediately with the shared happy-path fixture.
-			return respondExec !== undefined ? respondExec() : Promise.resolve({ stdout: happyStream, stderr: "", code: 0, killed: false });
-		},
 		sendUserMessage(content: string | unknown[], options?: { deliverAs?: string }): void {
 			fake.sent.push({ content, options });
 		},
@@ -101,7 +107,7 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 const tempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), "subagents-"));
 
 /** The argument following the first occurrence of `flag` in a spawn argv, or undefined. */
-const flagValue = (args: string[], flag: string): string | undefined => {
+const flagValue = (args: readonly string[], flag: string): string | undefined => {
 	const i = args.indexOf(flag);
 	return i === -1 ? undefined : args[i + 1];
 };
@@ -119,7 +125,7 @@ const toolCtx = fakeCtx as unknown as ToolCtx;
 
 test("command handler injects the subagent answer back as a follow-up", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	await fake.commandHandler("summarize the README", commandCtx);
@@ -135,7 +141,7 @@ test("command handler injects the subagent answer back as a follow-up", async ()
 
 test("a named persona applies its tools and system prompt, and the child still loads guardrails", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -158,7 +164,7 @@ test("a named persona applies its tools and system prompt, and the child still l
 
 test("a plain dispatch (no persona) still loads guardrails and runs with the default read-only tools", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd(); // no personas: the whole arg string is the task
@@ -178,7 +184,7 @@ test("a persona with no body dispatches without a --system-prompt flag (the chil
 	// that empty string would emit `--system-prompt ""`, replacing the child's default prompt
 	// with nothing; an empty body must instead fall back to the default like tools/model do.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -195,7 +201,7 @@ test("a persona with no body dispatches without a --system-prompt flag (the chil
 test("the agent_dispatch tool spawns a child that loads the guardrails extension", async () => {
 	// The tool routes through the shared dispatch, so its child must carry guardrails too.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
 
 	await fake.tool.execute("id", { task: "summarize the README" }, undefined, undefined, toolCtx);
@@ -208,7 +214,7 @@ test("the agent_dispatch tool spawns a child that loads the guardrails extension
 
 test("command handler handles an invalid task without throwing or spawning", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	await assert.doesNotReject(fake.commandHandler("@.env", commandCtx));
@@ -221,7 +227,7 @@ test("command handler handles an invalid task without throwing or spawning", asy
 
 test("a dispatch records a parent-session audit entry capturing the run's outcome", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	// A real temp cwd so the real writeLog has somewhere to land; we assert on the audit.
@@ -247,7 +253,7 @@ test("a dispatch still delivers the answer when audit persistence throws", async
 	// dispatch — the subagent's answer must still reach the parent conversation.
 	const fake = makeFakePi();
 	fake.appendThrows = true;
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -262,7 +268,7 @@ test("a dispatch still delivers the answer when audit persistence throws", async
 
 test("the agent_dispatch tool returns the subagent answer as its text content", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
 
 	const result = await fake.tool.execute("id", { task: "summarize the README" }, undefined, undefined, toolCtx);
@@ -284,7 +290,7 @@ test("the /agent handler surfaces a warning for a malformed persona file and sti
 	// loadPersonas skips a malformed file but reports it in `warnings`; the handler must
 	// surface that to the operator (not silently drop it) and still run the requested task.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const dir = await tempCwd();
@@ -302,7 +308,7 @@ test("the /agent handler surfaces a warning for a malformed persona file and sti
 
 test("/agent-log notifies the rendered tail of the most recent run log", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.logHandler, "the extension must register the agent-log command");
 
 	const dir = await tempCwd();
@@ -324,7 +330,7 @@ test("/agent-log notifies the rendered tail of the most recent run log", async (
 
 test("/agent-log reports no runs when the runs dir is absent, without throwing", async () => {
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.logHandler, "the extension must register the agent-log command");
 
 	const dir = await tempCwd(); // no .pi/runs/ inside it
@@ -339,7 +345,7 @@ test("/agent-log warns once when the most recent run log cannot be read", async 
 	// A directory whose name looks like a log file is listed by readdir yet rejects
 	// readFile (EISDIR). The handler must surface a single warning and never throw.
 	const fake = makeFakePi();
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.logHandler, "the extension must register the agent-log command");
 
 	const dir = await tempCwd();
@@ -389,7 +395,7 @@ test("agent_status reports an in-flight run as running and a completed run as do
 		settleExec = resolve;
 	});
 	const fake = makeFakePi(() => pendingExec);
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const statusTool = fake.tools.find((tool) => tool.name === "agent_status");
@@ -426,7 +432,7 @@ test("agent_kill aborts the in-flight child and the run stays killed after a lat
 		settleExec = resolve;
 	});
 	const fake = makeFakePi(() => pendingExec);
-	subagents(fake.pi);
+	subagents(fake.pi, { exec: fake.exec });
 	assert.ok(fake.commandHandler, "the extension must register the agent command");
 
 	const statusTool = fake.tools.find((tool) => tool.name === "agent_status");
