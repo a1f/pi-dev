@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionHandler, type SessionStartEvent } from "@earendil-works/pi-coding-agent";
 
 import { AUDIT_TYPE, COMMAND, INFLIGHT_FILE, LOG_COMMAND, RUNS_DIR, TOOL } from "./constants.ts";
 import subagents from "./index.ts";
 import { type SubagentRunAudit } from "./log.ts";
-import { parseInflight } from "./orphans.ts";
+import { type InflightRecord, parseInflight, serializeInflight } from "./orphans.ts";
 import { type ExecLike, type ExecResultLike } from "./runner.ts";
 import { type SpawnExec } from "./spawn.ts";
 
@@ -27,6 +27,9 @@ type CommandHandler = Parameters<ExtensionAPI["registerCommand"]>[1]["handler"];
 type ToolDef = Parameters<ExtensionAPI["registerTool"]>[0];
 type CommandCtx = Parameters<CommandHandler>[1];
 type ToolCtx = Parameters<ToolDef["execute"]>[4];
+/** The session_start handler the extension registers, and the ctx it receives — captured by the fake pi's on(). */
+type SessionStartHandler = ExtensionHandler<SessionStartEvent>;
+type SessionStartCtx = Parameters<SessionStartHandler>[1];
 
 /** The options the injected exec received, including the AbortSignal a kill aborts the child with. */
 type ExecOptions = NonNullable<Parameters<ExecLike>[2]>;
@@ -49,6 +52,8 @@ interface AuditCall {
 interface FakePi {
 	commandHandler: CommandHandler | undefined;
 	logHandler: CommandHandler | undefined;
+	/** The session_start handler captured from pi.on, invoked by the orphan-reaping test. */
+	sessionStartHandler: SessionStartHandler | undefined;
 	tool: ToolDef | undefined;
 	tools: ToolDef[];
 	/** The injected child runner passed to subagents as deps.exec; records into execCalls. */
@@ -73,6 +78,7 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 	const fake: FakePi = {
 		commandHandler: undefined,
 		logHandler: undefined,
+		sessionStartHandler: undefined,
 		tool: undefined,
 		tools: [],
 		exec,
@@ -83,6 +89,11 @@ function makeFakePi(respondExec?: () => Promise<ExecResultLike>): FakePi {
 		pi: undefined as unknown as ExtensionAPI,
 	};
 	const pi = {
+		on(event: string, handler: SessionStartHandler): void {
+			// Capture only the session_start handler the orphan-reaping test invokes; other
+			// events are accepted and ignored so registering them never throws.
+			if (event === "session_start") fake.sessionStartHandler = handler;
+		},
 		registerCommand(name: string, options: { handler: CommandHandler }): void {
 			if (name === COMMAND) fake.commandHandler = options.handler;
 			else if (name === LOG_COMMAND) fake.logHandler = options.handler;
@@ -510,4 +521,34 @@ test("a dispatch records its child's pid in the in-flight pidfile while running 
 	await dispatched;
 
 	assert.ok(!readInflight().some((record) => record.pid === childPid), "a completed run's pid must be removed from the in-flight pidfile");
+});
+
+test("on startup, session_start force-kills only the live orphan and clears the pidfile", async () => {
+	// A session that crashed mid-run can leave its in-flight children alive and still recorded in
+	// the pidfile. On the next fresh startup the extension must force-kill any recorded child whose
+	// process is still alive (a dead record needs no kill) and then clear the pidfile, since none of
+	// those runs belong to this new session. Liveness and kill are real OS effects, so both are
+	// injected; the pidfile is a real temp file as in the other lifecycle tests.
+	const aliveOrphan: InflightRecord = { runId: "alive-run", pid: 5001, startedAt: 1 };
+	const deadOrphan: InflightRecord = { runId: "dead-run", pid: 5002, startedAt: 2 };
+
+	const dir = await tempCwd();
+	const inflightPath = join(dir, INFLIGHT_FILE);
+	await mkdir(dirname(inflightPath), { recursive: true });
+	writeFileSync(inflightPath, serializeInflight([aliveOrphan, deadOrphan]), "utf8");
+
+	const killed: number[] = [];
+	const fake = makeFakePi();
+	subagents(fake.pi, {
+		processAlive: (record: InflightRecord) => record.pid === aliveOrphan.pid,
+		killProcess: (pid: number) => killed.push(pid),
+	});
+	assert.ok(fake.sessionStartHandler, "the extension must register a session_start handler");
+
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as SessionStartCtx;
+	await fake.sessionStartHandler({ type: "session_start", reason: "startup" }, ctx);
+
+	assert.deepEqual(killed, [aliveOrphan.pid], "only the still-alive orphan's pid must be force-killed");
+	const remaining = parseInflight(existsSync(inflightPath) ? readFileSync(inflightPath, "utf8") : "");
+	assert.equal(remaining.length, 0, "the pidfile must be cleared once startup orphans are reaped");
 });

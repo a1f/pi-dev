@@ -17,7 +17,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { AUDIT_TYPE, COMMAND, DEFAULT_TIMEOUT_MS, INFLIGHT_FILE, KILL_TOOL, LABEL, LOG_COMMAND, RUNS_DIR, STATUS_TOOL, TAIL_LINES, TOOL } from "./constants.ts";
 import { pickLatestLogName, renderLogTail, type SubagentRunAudit } from "./log.ts";
-import { type InflightRecord, parseInflight, serializeInflight } from "./orphans.ts";
+import { type InflightRecord, parseInflight, reapOrphans, serializeInflight } from "./orphans.ts";
 import { loadPersonas, type Persona, resolveDispatch } from "./personas.ts";
 import { RunRegistry, renderRows } from "./registry.ts";
 import { defaultRunId, formatReply, runAgent, type DispatchResult, type LogWriter } from "./runner.ts";
@@ -32,6 +32,10 @@ const GUARDRAILS_EXTENSION = join(dirname(fileURLToPath(import.meta.url)), "..",
 export interface SubagentDeps {
 	/** The child runner, injected so tests fake the child and later slices can wrap it to capture the child's pid. */
 	exec?: SpawnExec;
+	/** Liveness probe injected so the OS effect is fakeable: true only when a recorded child is still running AND still our subagent, so a reused pid is never reaped. */
+	processAlive?: (record: InflightRecord) => boolean;
+	/** Force-kill injected so the OS effect is fakeable: terminates a reaped orphan by pid. */
+	killProcess?: (pid: number) => void;
 }
 
 // The pidfile's imperative shell: record/remove are synchronous so the pid persists before any
@@ -59,8 +63,36 @@ function removeInflight(cwd: string, runId: string): void {
 	}
 }
 
+/** Default PID-reuse-safe liveness probe: a recorded child counts as a live orphan only when its pid is running AND its /proc cmdline still identifies our one-shot pi child, so a process that reused a dead child's pid is never killed. */
+const defaultProcessAlive = (record: InflightRecord): boolean => {
+	try {
+		process.kill(record.pid, 0);
+	} catch {
+		// Signal 0 only probes; a throw means no such process (or no permission), so not a live orphan.
+		return false;
+	}
+	try {
+		const cmdline = readFileSync(`/proc/${record.pid}/cmdline`, "utf8");
+		return cmdline.includes("--mode") && cmdline.includes("json");
+	} catch {
+		// No /proc (non-Linux) or unreadable: identity unconfirmed, so never kill it.
+		return false;
+	}
+};
+
+/** Default force-kill for a reaped orphan, swallowing the error when the process is already gone so reaping a stale record never throws. */
+const defaultKillProcess = (pid: number): void => {
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		// Already gone: nothing to kill.
+	}
+};
+
 export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	const exec: SpawnExec = deps.exec ?? makeSpawnExec(defaultSpawnDeps);
+	const processAlive = deps.processAlive ?? defaultProcessAlive;
+	const killProcess = deps.killProcess ?? defaultKillProcess;
 
 	// The real log writer: the only fs in the dispatch path. Injected into runAgent,
 	// which keeps logging best-effort and swallows any failure here.
@@ -128,6 +160,25 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 		}
 		return result;
 	};
+
+	// Reap children a crashed prior session left in flight: on session start, force-kill any recorded
+	// child whose process is still alive (a dead record needs no kill) and clear the pidfile, since
+	// none of those runs belong to this new session and session_start fires before any new dispatch.
+	// Best-effort and fully swallowed — a missing/unreadable pidfile is nothing to do, and reaping
+	// must never break session start.
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			const path = join(ctx.cwd, INFLIGHT_FILE);
+			const records = parseInflight(readFileSync(path, "utf8"));
+			const reaped = reapOrphans(records, { isAlive: processAlive, kill: killProcess });
+			writeFileSync(path, serializeInflight([]), "utf8");
+			if (reaped.length > 0) {
+				ctx.ui.notify(`[${LABEL}] reaped ${reaped.length} orphaned subagent(s)`, "info");
+			}
+		} catch {
+			// Swallow: a missing/unreadable pidfile means nothing to reap, and reaping must never break session start.
+		}
+	});
 
 	pi.registerCommand(COMMAND, {
 		description: "Dispatch a headless read-only subagent to perform <task>; its answer is injected as a follow-up.",
