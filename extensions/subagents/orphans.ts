@@ -1,8 +1,9 @@
-// JSONL codec for the in-flight pidfile that tracks subagent child processes.
+// In-flight pidfile that tracks subagent child processes: a JSONL codec plus the reaper
+// that force-kills children orphaned by a dead session.
 //
-// Pure: it only converts between records and the pidfile's line format so a later
-// session can detect orphaned children. The pidfile is untrusted input — a prior
-// session may have crashed mid-write — so parsing is total and never throws.
+// The pidfile is untrusted input — a prior session may have crashed mid-write — so
+// parsing is total and never throws. reapOrphans takes its OS effects (liveness, kill)
+// as injected deps, keeping the reap decision pure and testable.
 
 import { isObject } from "./events.ts";
 
@@ -40,4 +41,19 @@ export function parseInflight(content: string): InflightRecord[] {
 /** Render records as one JSON object per line, mirroring the JSONL framing of the run logs. */
 export function serializeInflight(records: readonly InflightRecord[]): string {
 	return records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+}
+
+/** Injected OS effects for reaping: liveness check (alive AND still our subagent — PID-reuse safe) and a force-kill. */
+export interface ReapDeps {
+	isAlive: (record: InflightRecord) => boolean;
+	kill: (pid: number) => void;
+}
+
+/** Force-kill the in-flight records whose process is still alive (orphans of a dead session); returns the reaped records. */
+export function reapOrphans(records: readonly InflightRecord[], deps: ReapDeps): InflightRecord[] {
+	const reaped = records.filter((record) => deps.isAlive(record));
+	for (const record of reaped) {
+		deps.kill(record.pid);
+	}
+	return reaped;
 }
