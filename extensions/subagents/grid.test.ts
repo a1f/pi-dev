@@ -33,6 +33,7 @@ test("cardFromRecord maps a running record, deriving elapsed from now", () => {
 		toolCount: 3,
 		contextPct: 42,
 		lastLine: "reading files",
+		malformed: 0,
 	});
 });
 
@@ -75,6 +76,7 @@ test("idleCard maps a persona to an idle card with no run metrics", () => {
 		toolCount: 0,
 		contextPct: null,
 		lastLine: null,
+		malformed: 0,
 	});
 });
 
@@ -90,6 +92,7 @@ test("renderGrid fills the context bar proportionally and empties it when unknow
 		toolCount: 1,
 		contextPct: 50,
 		lastLine: "x",
+		malformed: 0,
 	};
 	// 50% over the default bar width of 10 → 5 filled + 5 empty.
 	assert.ok(renderGrid({ cards: [half], columns: 1, theme: DEFAULT_GRID_THEME }).includes("█████░░░░░"));
@@ -101,7 +104,7 @@ test("renderGrid fills the context bar proportionally and empties it when unknow
 
 // A compact ASCII theme keeps the layout goldens readable and exactly computable.
 const snapshotTheme: GridTheme = {
-	glyph: { running: "R", done: "D", error: "E", killed: "K", idle: "I" },
+	glyph: { running: "R", queued: "Q", done: "D", error: "E", killed: "K", idle: "I" },
 	barFilled: "#",
 	barEmpty: ".",
 	barWidth: 4,
@@ -110,10 +113,10 @@ const snapshotTheme: GridTheme = {
 
 // A representative mix: a running, a done, an error, and an idle card.
 const snapshotCards: readonly GridCard[] = [
-	{ title: "scout", status: "running", elapsedMs: 3000, toolCount: 2, contextPct: 50, lastLine: "reading files" },
-	{ title: "build", status: "done", elapsedMs: 1000, toolCount: 5, contextPct: 25, lastLine: "done" },
-	{ title: "deploy", status: "error", elapsedMs: 2000, toolCount: 1, contextPct: null, lastLine: "boom" },
-	{ title: "critic", status: "idle", elapsedMs: null, toolCount: 0, contextPct: null, lastLine: null },
+	{ title: "scout", status: "running", elapsedMs: 3000, toolCount: 2, contextPct: 50, lastLine: "reading files", malformed: 0 },
+	{ title: "build", status: "done", elapsedMs: 1000, toolCount: 5, contextPct: 25, lastLine: "done", malformed: 0 },
+	{ title: "deploy", status: "error", elapsedMs: 2000, toolCount: 1, contextPct: null, lastLine: "boom", malformed: 0 },
+	{ title: "critic", status: "idle", elapsedMs: null, toolCount: 0, contextPct: null, lastLine: null, malformed: 0 },
 ];
 
 test("renderGrid stacks every card in a single column", () => {
@@ -155,7 +158,7 @@ test("renderGrid lays cards into three columns, leaving a one-card last row", ()
 
 test("renderGrid truncates a title and last line that overflow cardWidth with an ellipsis", () => {
 	const narrow: GridTheme = {
-		glyph: { running: "R", done: "D", error: "E", killed: "K", idle: "I" },
+		glyph: { running: "R", queued: "Q", done: "D", error: "E", killed: "K", idle: "I" },
 		barFilled: "#",
 		barEmpty: ".",
 		barWidth: 3,
@@ -168,6 +171,7 @@ test("renderGrid truncates a title and last line that overflow cardWidth with an
 		toolCount: 2,
 		contextPct: 100,
 		lastLine: "this is a long output line",
+		malformed: 0,
 	};
 
 	const out = renderGrid({ cards: [card], columns: 1, theme: narrow });
@@ -185,6 +189,7 @@ test("renderGrid strips control characters from untrusted title and last line", 
 		toolCount: 1,
 		contextPct: 50,
 		lastLine: "out\x1b[0m\tline\rhere",
+		malformed: 0,
 	};
 
 	const out = renderGrid({ cards: [card], columns: 1, theme: snapshotTheme });
@@ -207,6 +212,7 @@ test("renderGrid truncates on a whole code point, never splitting an astral char
 		toolCount: 1,
 		contextPct: 0,
 		lastLine: null,
+		malformed: 0,
 	};
 
 	const out = renderGrid({ cards: [card], columns: 1, theme: narrow });
@@ -223,6 +229,7 @@ test("renderGrid renders a full-width context bar for a non-finite or over-range
 		toolCount: 0,
 		contextPct: Number.NaN,
 		lastLine: null,
+		malformed: 0,
 	};
 
 	// NaN context must not collapse the bar to zero cells — it stays full width, all empty.
@@ -236,4 +243,34 @@ test("renderGrid clamps a non-positive column count to a single column", () => {
 	const single = renderGrid({ cards: snapshotCards, columns: 1, theme: snapshotTheme });
 	assert.equal(renderGrid({ cards: snapshotCards, columns: 0, theme: snapshotTheme }), single);
 	assert.equal(renderGrid({ cards: snapshotCards, columns: -3, theme: snapshotTheme }), single);
+});
+
+test("renderGrid marks a card whose run had malformed lines with a ⚠ warning, and leaves a clean run unmarked", () => {
+	// A generous cardWidth keeps the short marker clear of the truncation ellipsis.
+	const wideTheme: GridTheme = { ...DEFAULT_GRID_THEME, cardWidth: 40 };
+	const state: RunState = {
+		toolCount: 2,
+		lastLine: "scanning",
+		contextTokens: 1500,
+		contextPct: 30,
+		done: false,
+		malformed: 3,
+	};
+	const record: RunRecord = {
+		runId: "r-malformed",
+		task: "scout",
+		persona: null,
+		status: "running",
+		startedAt: 1000,
+		finishedAt: null,
+		state,
+	};
+
+	const warned = renderGrid({ cards: [cardFromRecord(record, 4000)], columns: 1, theme: wideTheme });
+	assert.ok(warned.includes("⚠3"), `expected a ⚠3 marker in ${JSON.stringify(warned)}`);
+
+	// Identical run but for malformed: 0 — isolates the marker to the malformed count.
+	const cleanRecord: RunRecord = { ...record, runId: "r-clean", state: { ...state, malformed: 0 } };
+	const clean = renderGrid({ cards: [cardFromRecord(cleanRecord, 4000)], columns: 1, theme: wideTheme });
+	assert.ok(!clean.includes("⚠"), `expected no ⚠ marker in ${JSON.stringify(clean)}`);
 });

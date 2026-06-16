@@ -123,7 +123,7 @@ test("renderDashboard packs cards into width-fitted rows and yields no lines whe
 	// A small ascii theme makes the column math predictable: cardWidth 10 + the 2-column gutter
 	// is a 12-column stride, so a width of 24 fits two cards across and a width of 10 fits one.
 	const theme: GridTheme = {
-		glyph: { running: "R", done: "D", error: "E", killed: "K", idle: "I" },
+		glyph: { running: "R", queued: "Q", done: "D", error: "E", killed: "K", idle: "I" },
 		barFilled: "#",
 		barEmpty: ".",
 		barWidth: 3,

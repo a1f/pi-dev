@@ -19,6 +19,7 @@ export interface GridCard {
 	toolCount: number;
 	contextPct: number | null;
 	lastLine: string | null;
+	malformed: number;
 }
 
 /** A run record → card. `now` is injected so elapsed is deterministic. */
@@ -31,6 +32,7 @@ export function cardFromRecord(record: RunRecord, now: number): GridCard {
 		toolCount: state.toolCount,
 		contextPct: state.contextPct,
 		lastLine: state.lastLine,
+		malformed: state.malformed,
 	};
 }
 
@@ -43,9 +45,9 @@ export interface GridTheme {
 	cardWidth: number;
 }
 
-/** Defaults consistent with registry.ts row glyphs (▶ ✓ ✗ ⊘); idle gets its own marker. */
+/** Defaults consistent with registry.ts row glyphs (▶ ▷ ✓ ✗ ⊘); idle gets its own marker. */
 export const DEFAULT_GRID_THEME: GridTheme = {
-	glyph: { running: "▶", done: "✓", error: "✗", killed: "⊘", idle: "○" },
+	glyph: { running: "▶", queued: "▷", done: "✓", error: "✗", killed: "⊘", idle: "○" },
 	barFilled: "█",
 	barEmpty: "░",
 	barWidth: 10,
@@ -61,6 +63,7 @@ export function idleCard(persona: Persona): GridCard {
 		toolCount: 0,
 		contextPct: null,
 		lastLine: null,
+		malformed: 0,
 	};
 }
 
@@ -111,9 +114,12 @@ function cardLines(card: GridCard, theme: GridTheme): readonly string[] {
 	// title and lastLine are untrusted (task text, child output): sanitize before measuring/padding.
 	const title = sanitize(card.title);
 	const lastLine = sanitize(card.lastLine ?? "");
+	// Surface skipped malformed event lines as a ⚠ count; a clean run adds nothing, so its metrics
+	// line stays byte-identical. Appended before fit so the marker is width-clamped like the rest.
+	const marker = card.malformed > 0 ? ` ⚠${card.malformed}` : "";
 	return [
 		fit(`${theme.glyph[card.status]} ${title}`, cardWidth),
-		fit(`${elapsedText(card)} · ${card.toolCount} tools · ${contextBar(card, theme)}`, cardWidth),
+		fit(`${elapsedText(card)} · ${card.toolCount} tools · ${contextBar(card, theme)}${marker}`, cardWidth),
 		fit(lastLine, cardWidth),
 	];
 }

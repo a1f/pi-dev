@@ -159,3 +159,91 @@ test("renderRows renders one line per run with its glyph, task, elapsed seconds,
 	assert.ok(doneLine.includes("12%"));
 	assert.ok(doneLine.includes("All set."));
 });
+
+test("start flips a queued run to running once, restamping its start time, and is a no-op otherwise", () => {
+	const reg = new RunRegistry();
+
+	reg.register({ runId: "q1", task: "scout repo", startedAt: 1000, status: "queued" });
+	assert.equal(reg.get("q1")?.status, "queued");
+	assert.equal(reg.get("q1")?.startedAt, 1000);
+
+	// Acquiring a slot starts the run: status becomes running and the start time is
+	// restamped so elapsed measures run time, not queue wait.
+	assert.equal(reg.start({ runId: "q1", startedAt: 5000 }), true);
+	assert.equal(reg.get("q1")?.status, "running");
+	assert.equal(reg.get("q1")?.startedAt, 5000);
+
+	// Starting an already-running run changes nothing.
+	assert.equal(reg.start({ runId: "q1", startedAt: 9000 }), false);
+	assert.equal(reg.get("q1")?.status, "running");
+	assert.equal(reg.get("q1")?.startedAt, 5000);
+
+	// Starting an unknown run changes nothing.
+	assert.equal(reg.start({ runId: "nope", startedAt: 1 }), false);
+});
+
+test("kill cancels a queued run, firing its onKill hook, so a run killed while queued never starts", () => {
+	const reg = new RunRegistry();
+
+	let killed = false;
+	reg.register({
+		runId: "q1",
+		task: "scout repo",
+		startedAt: 1000,
+		status: "queued",
+		onKill: () => {
+			killed = true;
+		},
+	});
+
+	assert.equal(reg.kill("q1"), true);
+	assert.equal(killed, true);
+	assert.equal(reg.get("q1")?.status, "killed");
+
+	// A run killed while waiting in the queue must never spawn: a later slot acquisition is a no-op.
+	assert.equal(reg.start({ runId: "q1", startedAt: 5000 }), false);
+	assert.equal(reg.get("q1")?.status, "killed");
+});
+
+test("renderRows surfaces a run's malformed-line count and omits it when the count is zero", () => {
+	const reg = new RunRegistry();
+
+	const noisyState: RunState = {
+		toolCount: 1,
+		lastLine: "still working",
+		contextTokens: 500,
+		contextPct: 25,
+		done: true,
+		malformed: 2,
+	};
+	reg.register({ runId: "r1", task: "noisy parse", startedAt: 1000 });
+	reg.finish({ runId: "r1", status: "done", state: noisyState, finishedAt: 2000 });
+
+	const cleanState: RunState = {
+		toolCount: 2,
+		lastLine: "all good",
+		contextTokens: 1000,
+		contextPct: 50,
+		done: true,
+		malformed: 0,
+	};
+	reg.register({ runId: "r2", task: "clean parse", startedAt: 1000 });
+	reg.finish({ runId: "r2", status: "done", state: cleanState, finishedAt: 2000 });
+
+	reg.register({ runId: "r3", task: "waiting parse", startedAt: 1000, status: "queued" });
+
+	const out = renderRows(reg.list(), 4500);
+	const lines = out.split("\n");
+
+	const noisyLine = lines.find((line) => line.includes("noisy parse"));
+	assert.ok(noisyLine, "expected a row for the run with malformed output");
+	assert.ok(noisyLine.includes("2 malformed"));
+
+	const cleanLine = lines.find((line) => line.includes("clean parse"));
+	assert.ok(cleanLine, "expected a row for the run with no malformed output");
+	assert.ok(!cleanLine.includes("malformed"));
+
+	const queuedLine = lines.find((line) => line.includes("waiting parse"));
+	assert.ok(queuedLine, "expected a row for the queued run");
+	assert.ok(queuedLine.includes("▷"));
+});

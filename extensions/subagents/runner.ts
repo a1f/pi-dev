@@ -67,8 +67,8 @@ export function formatReply(task: string, result: Omit<DispatchResult, "state">)
 /** No-op writer: the default so runAgent never needs node:fs unless a real writer is injected. */
 const noopWriteLog: LogWriter = async () => {};
 
-/** The zero RunState reported on early-return paths, before any child stream is folded. */
-const EMPTY_RUN_STATE: RunState = {
+/** The zero RunState reported on early-return paths, before any child stream is folded; exported so the dispatch adapter reuses it for a run cancelled before it ever spawned. */
+export const EMPTY_RUN_STATE: RunState = {
 	toolCount: 0,
 	lastLine: null,
 	contextTokens: null,
