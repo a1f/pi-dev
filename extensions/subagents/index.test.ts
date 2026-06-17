@@ -337,10 +337,96 @@ test("the agent_dispatch tool returns the subagent answer as its text content", 
 	assert.ok(block && block.type === "text" && block.text.includes(ANSWER), "the tool result must include the subagent's answer");
 });
 
+test("the agent_dispatch tool honors a named persona, applying its tools and system prompt while still loading guardrails", async () => {
+	// The tool now accepts an explicit persona name so an orchestrator can dispatch a named
+	// persona, not just the human-typed /agent command: the child must carry the persona's
+	// tools and system prompt — and guardrails — exactly as the command-path dispatch does.
+	const fake = makeFakePi();
+	subagents(fake.pi, { exec: fake.exec });
+	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
+
+	const dir = await tempCwd();
+	await writePersona(
+		dir,
+		"scout.md",
+		"---\nname: scout\ndescription: Maps the repository.\ntools:\n  - read\n  - grep\n  - find\n---\nYou are scout. Map the repository.",
+	);
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as ToolCtx;
+
+	await fake.tool.execute("id", { task: "summarize the layout", persona: "scout" }, undefined, undefined, ctx);
+
+	assert.equal(fake.execCalls.length, 1, "a persona dispatch through the tool must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	assert.equal(flagValue(args, "--tools"), "read,grep,find", "the child must run with the persona's tools");
+	assert.equal(flagValue(args, "--system-prompt"), "You are scout. Map the repository.", "the persona body becomes the child's system prompt");
+	const extension = flagValue(args, "--extension");
+	assert.ok(extension !== undefined && extension.endsWith("guardrails"), "a persona dispatch through the tool must still load guardrails");
+});
+
+test("the agent_dispatch tool returns a friendly error for an unknown persona and spawns no child", async () => {
+	// A named persona that does not exist must not silently fall back to a generic subagent: the
+	// tool rejects with an error result and never spawns a child (mirroring agent_continue's
+	// unknown-persona shape), so the orchestrator learns the name was wrong.
+	const fake = makeFakePi();
+	subagents(fake.pi, { exec: fake.exec });
+	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
+
+	const dir = await tempCwd(); // no personas at all
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as ToolCtx;
+
+	const result = await fake.tool.execute("id", { task: "summarize the layout", persona: "ghost" }, undefined, undefined, ctx);
+
+	assert.equal(fake.execCalls.length, 0, "an unknown persona must not spawn a child");
+	const block = result.content[0];
+	assert.ok(block && block.type === "text" && /ghost/.test(block.text), "the error must name the unknown persona");
+	assert.ok(block && block.type === "text" && !block.text.includes(ANSWER), "an unknown persona must not read as a successful run");
+});
+
+test("the agent_dispatch tool with no persona preserves a persona-less read-only child with guardrails", async () => {
+	// Omitting the persona param must keep today's behavior: a generic read-only subagent that loads
+	// guardrails and runs the default read-only tools — never a persona, never a persona prompt.
+	const fake = makeFakePi();
+	subagents(fake.pi, { exec: fake.exec });
+	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
+
+	const dir = await tempCwd(); // no personas: a persona-less dispatch
+	const ctx = { cwd: dir, ui: { notify() {} }, hasUI: false } as unknown as ToolCtx;
+
+	await fake.tool.execute("id", { task: "summarize the README" }, undefined, undefined, ctx);
+
+	assert.equal(fake.execCalls.length, 1, "a persona-less dispatch must spawn exactly one child");
+	const args = fake.execCalls[0]?.args ?? [];
+	const extension = flagValue(args, "--extension");
+	assert.ok(extension !== undefined && extension.endsWith("guardrails"), "a persona-less child must still load guardrails");
+	assert.equal(flagValue(args, "--tools"), "read,grep,find,ls", "a persona-less dispatch keeps the default read-only tools");
+	assert.equal(flagValue(args, "--system-prompt"), undefined, "a persona-less dispatch carries no persona system prompt");
+});
+
 interface Note {
 	msg: string;
 	level: string;
 }
+
+test("the agent_dispatch tool surfaces a persona-load warning for a malformed persona file and still dispatches", async () => {
+	// loadPersonas skips a malformed file but reports it in `warnings`; the tool must surface that to
+	// the operator (as the /agent command does) and still dispatch the requested valid persona.
+	const fake = makeFakePi();
+	subagents(fake.pi, { exec: fake.exec });
+	assert.ok(fake.tool, "the extension must register the agent_dispatch tool");
+
+	const dir = await tempCwd();
+	await writePersona(dir, "broken.md", "no frontmatter fence at all");
+	await writePersona(dir, "scout.md", "---\nname: scout\ndescription: Maps the repository.\ntools:\n  - read\n---\nYou are scout.");
+	const notes: Note[] = [];
+	const ctx = { cwd: dir, ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) }, hasUI: false } as unknown as ToolCtx;
+
+	await fake.tool.execute("id", { task: "map the repo", persona: "scout" }, undefined, undefined, ctx);
+
+	const warning = notes.find((note) => note.level === "warning");
+	assert.ok(warning, "a malformed persona file must surface a warning notification through the tool");
+	assert.match(warning.msg, /broken\.md/);
+	assert.equal(fake.execCalls.length, 1, "a malformed sibling persona must not stop the requested dispatch");
+});
 
 const notifyingCtx = (cwd: string, notes: Note[]): CommandCtx =>
 	({ cwd, ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) }, hasUI: false }) as unknown as CommandCtx;

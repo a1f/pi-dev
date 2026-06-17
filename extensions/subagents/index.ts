@@ -109,6 +109,9 @@ async function pathExists(path: string): Promise<boolean> {
 	}
 }
 
+/** The friendly error both persona resolvers return for a name that matches no loaded persona, shared so the continue and dispatch paths stay identical. */
+const noPersonaNamed = (name: string): string => `no persona named '${name}'`;
+
 /** A resolved continue request — the persona to resume — or a friendly reason it can't be resumed. */
 type ContinueTarget = { ok: true; persona: Persona } | { ok: false; error: string };
 
@@ -121,10 +124,26 @@ type ContinueTarget = { ok: true; persona: Persona } | { ok: false; error: strin
 async function resolveContinueTarget(opts: { name: string; personas: readonly Persona[]; cwd: string }): Promise<ContinueTarget> {
 	const { name, personas, cwd } = opts;
 	const persona = personas.find((candidate) => candidate.name === name) ?? null;
-	if (persona === null) return { ok: false, error: `no persona named '${name}'` };
+	if (persona === null) return { ok: false, error: noPersonaNamed(name) };
 	const session = sessionPathFor(cwd, persona.name);
 	if (session === null) return { ok: false, error: `persona '${name}' has an unsafe name and cannot resume a session` };
 	if (!(await pathExists(session))) return { ok: false, error: `no prior session for '${name}'; dispatch it first with /${COMMAND}` };
+	return { ok: true, persona };
+}
+
+/** A resolved dispatch request — the persona to run, or null when none was named — or a friendly reason the named persona can't be found. */
+type DispatchTarget = { ok: true; persona: Persona | null } | { ok: false; error: string };
+
+/**
+ * Resolve the agent_dispatch tool's optional `persona` param to the persona to run — null when
+ * omitted (a generic read-only child, today's behavior) — or a friendly error naming an unknown
+ * persona, mirroring resolveContinueTarget so a bad name never silently falls back to a generic
+ * subagent. Pure: the caller loads the personas (and surfaces their warnings) before resolving.
+ */
+function resolveDispatchTarget(name: string | undefined, personas: readonly Persona[]): DispatchTarget {
+	if (name === undefined) return { ok: true, persona: null };
+	const persona = personas.find((candidate) => candidate.name === name) ?? null;
+	if (persona === null) return { ok: false, error: noPersonaNamed(name) };
 	return { ok: true, persona };
 }
 
@@ -153,8 +172,19 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 
 	// The persona roster the most recent command loaded, reused by refresh so the animation loop
 	// renders without re-reading disk on every tick. Empty until a command first loads personas;
-	// the command/tool handlers that call loadPersonas refresh it.
+	// loadPersonasTracked refreshes it.
 	let lastPersonas: Persona[] = [];
+
+	// Load the project's personas and track them for the dashboard, surfacing each parse warning to
+	// the operator (mirroring the guardrails sibling's notify pattern). The single place the load +
+	// roster bookkeeping + malformed-file warnings live, so every command and tool that loads personas
+	// does it the same way — a malformed file is skipped with a warning, never silently dropped.
+	const loadPersonasTracked = (ctx: ExtensionContext): Persona[] => {
+		const { personas, warnings } = loadPersonas(ctx.cwd);
+		lastPersonas = personas;
+		for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
+		return personas;
+	};
 
 	// Push the live grid dashboard of every tracked run into the footer, or clear it when there is
 	// nothing to show. A no-op without a UI: the print/RPC contexts have no setWidget, so calling it
@@ -318,11 +348,7 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 		description: "Dispatch a headless read-only subagent to perform <task>; its answer is injected as a follow-up.",
 		handler: async (args, ctx) => {
 			// A leading token matching a project persona selects it; the remainder is the task.
-			// Surface persona-load warnings (a malformed file is skipped, never silently dropped),
-			// mirroring the guardrails sibling's notify pattern, before resolving the dispatch.
-			const { personas, warnings } = loadPersonas(ctx.cwd);
-			lastPersonas = personas;
-			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
+			const personas = loadPersonasTracked(ctx);
 			const { persona, task } = resolveDispatch(args, personas);
 			if (task === "") {
 				ctx.ui.notify(`[${LABEL}] usage: /${COMMAND} [persona] <task>`, "warning");
@@ -343,9 +369,7 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 				ctx.ui.notify(`[${LABEL}] usage: /${CONTINUE_COMMAND} <persona> <task>`, "warning");
 				return;
 			}
-			const { personas, warnings } = loadPersonas(ctx.cwd);
-			lastPersonas = personas;
-			for (const warning of warnings) ctx.ui.notify(`[${LABEL}] ${warning}`, "warning");
+			const personas = loadPersonasTracked(ctx);
 			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
 			if (!target.ok) {
 				ctx.ui.notify(`[${LABEL}] ${target.error}`, "warning");
@@ -359,12 +383,20 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 	pi.registerTool({
 		name: TOOL,
 		label: "Dispatch subagent",
-		description: "Dispatch a headless read-only subagent to perform a task and return its final answer.",
+		description: "Dispatch a headless subagent to perform a task and return its final answer; runs read-only by default, or as a named persona from .pi/agents with its own tools/model/system prompt.",
 		parameters: Type.Object({
 			task: Type.String({ description: "The task for the subagent to perform." }),
+			persona: Type.Optional(Type.String({ description: "Optional persona name from .pi/agents to run with its tools/model/system prompt; omit for a generic read-only subagent." })),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			const result = await dispatch({ task: params.task, persona: null, ctx });
+			// Load + track personas (surfacing any malformed-file warning), then resolve the requested
+			// name purely — exactly as the agent_continue path separates load from resolve.
+			const personas = loadPersonasTracked(ctx);
+			const resolved = resolveDispatchTarget(params.persona, personas);
+			if (!resolved.ok) {
+				return { content: [{ type: "text", text: resolved.error }], details: { ok: false, error: resolved.error } };
+			}
+			const result = await dispatch({ task: params.task, persona: resolved.persona, ctx });
 			return { content: [{ type: "text", text: formatReply(params.task, result) }], details: result };
 		},
 	});
@@ -378,8 +410,7 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 			task: Type.String({ description: "The follow-up task for the resumed subagent." }),
 		}),
 		execute: async (_toolCallId, { persona: name, task }, _signal, _onUpdate, ctx) => {
-			const { personas } = loadPersonas(ctx.cwd);
-			lastPersonas = personas;
+			const personas = loadPersonasTracked(ctx);
 			const target = await resolveContinueTarget({ name, personas, cwd: ctx.cwd });
 			if (!target.ok) {
 				return { content: [{ type: "text", text: target.error }], details: { ok: false, error: target.error } };
