@@ -75,6 +75,7 @@ export const EMPTY_RUN_STATE: RunState = {
 	contextPct: null,
 	done: false,
 	malformed: 0,
+	activity: [],
 };
 
 /** Per-process counter so two same-millisecond dispatches never derive the same run id. */

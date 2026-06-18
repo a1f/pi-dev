@@ -90,3 +90,14 @@ test("malformed lines are counted and skipped, blank lines ignored, never thrown
 	assert.equal(state.lastLine, "The config is valid.");
 	assert.equal(state.contextTokens, 2824);
 });
+
+test("activity records each tool_execution_start as tool name + a short target from its args", () => {
+	const state = reduceRunState([
+		'{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"package.json"}}',
+		'{"type":"tool_execution_start","toolCallId":"t2","toolName":"grep","args":{"pattern":"reduceRunState"}}',
+	]);
+	assert.deepEqual(state.activity, [
+		{ tool: "read", target: "package.json" },
+		{ tool: "grep", target: "reduceRunState" },
+	]);
+});

@@ -15,6 +15,7 @@ test("cardFromRecord maps a running record, deriving elapsed from now", () => {
 		contextPct: 42,
 		done: false,
 		malformed: 0,
+		activity: [],
 	};
 	const record: RunRecord = {
 		runId: "r1",
@@ -45,6 +46,7 @@ test("cardFromRecord measures a finished record's elapsed against finishedAt, no
 		contextPct: 10,
 		done: true,
 		malformed: 0,
+		activity: [],
 	};
 	const record: RunRecord = {
 		runId: "r2",
@@ -255,6 +257,7 @@ test("renderGrid marks a card whose run had malformed lines with a ⚠ warning, 
 		contextPct: 30,
 		done: false,
 		malformed: 3,
+		activity: [],
 	};
 	const record: RunRecord = {
 		runId: "r-malformed",

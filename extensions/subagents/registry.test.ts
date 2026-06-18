@@ -13,6 +13,7 @@ const emptyRunState: RunState = {
 	contextPct: null,
 	done: false,
 	malformed: 0,
+	activity: [],
 };
 
 test("register creates a running record retrievable by id and present in the list", () => {
@@ -56,6 +57,7 @@ test("finish records the terminal status, final state, and finish time for both 
 		contextPct: 0.6,
 		done: true,
 		malformed: 0,
+		activity: [],
 	};
 	reg.register({ runId: "r1", task: "summarize the readme", startedAt: 1000 });
 	reg.finish({ runId: "r1", status: "done", state: doneState, finishedAt: 4500 });
@@ -72,6 +74,7 @@ test("finish records the terminal status, final state, and finish time for both 
 		contextPct: null,
 		done: false,
 		malformed: 2,
+		activity: [],
 	};
 	reg.register({ runId: "r2", task: "build the thing", startedAt: 2000 });
 	reg.finish({ runId: "r2", status: "error", state: errorState, finishedAt: 3000 });
@@ -117,6 +120,7 @@ test("kill terminates only a running run, firing its onKill hook, and is a no-op
 		contextPct: null,
 		done: true,
 		malformed: 0,
+		activity: [],
 	};
 	reg.finish({ runId: "r2", status: "done", state: doneState, finishedAt: 3000 });
 
@@ -136,6 +140,7 @@ test("renderRows renders one line per run with its glyph, task, elapsed seconds,
 		contextPct: 12,
 		done: true,
 		malformed: 0,
+		activity: [],
 	};
 	reg.register({ runId: "r2", task: "summarize", startedAt: 1000 });
 	reg.finish({ runId: "r2", status: "done", state: doneState, finishedAt: 2000 });
@@ -215,6 +220,7 @@ test("renderRows surfaces a run's malformed-line count and omits it when the cou
 		contextPct: 25,
 		done: true,
 		malformed: 2,
+		activity: [],
 	};
 	reg.register({ runId: "r1", task: "noisy parse", startedAt: 1000 });
 	reg.finish({ runId: "r1", status: "done", state: noisyState, finishedAt: 2000 });
@@ -226,6 +232,7 @@ test("renderRows surfaces a run's malformed-line count and omits it when the cou
 		contextPct: 50,
 		done: true,
 		malformed: 0,
+		activity: [],
 	};
 	reg.register({ runId: "r2", task: "clean parse", startedAt: 1000 });
 	reg.finish({ runId: "r2", status: "done", state: cleanState, finishedAt: 2000 });

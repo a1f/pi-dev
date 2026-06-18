@@ -34,7 +34,7 @@ export interface RunRecord {
 
 /** The zero RunState a run starts from, before any child events are folded in. */
 function emptyRunState(): RunState {
-	return { toolCount: 0, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0 };
+	return { toolCount: 0, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0, activity: [] };
 }
 
 export class RunRegistry {

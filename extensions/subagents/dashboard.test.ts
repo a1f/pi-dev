@@ -47,7 +47,7 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 		status: "done",
 		startedAt: 1_000,
 		finishedAt: 4_000,
-		state: { toolCount: 3, lastLine: "first pass", contextTokens: null, contextPct: null, done: true, malformed: 0 },
+		state: { toolCount: 3, lastLine: "first pass", contextTokens: null, contextPct: null, done: true, malformed: 0, activity: [] },
 	};
 	const scoutLatest: RunRecord = {
 		runId: "scout-2",
@@ -56,7 +56,7 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 		status: "running",
 		startedAt: 5_000,
 		finishedAt: null,
-		state: { toolCount: 7, lastLine: "second pass", contextTokens: null, contextPct: 42, done: false, malformed: 0 },
+		state: { toolCount: 7, lastLine: "second pass", contextTokens: null, contextPct: 42, done: false, malformed: 0, activity: [] },
 	};
 	const personaLess: RunRecord = {
 		runId: "loose-1",
@@ -65,7 +65,7 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 		status: "running",
 		startedAt: 6_000,
 		finishedAt: null,
-		state: { toolCount: 1, lastLine: "reading", contextTokens: null, contextPct: null, done: false, malformed: 0 },
+		state: { toolCount: 1, lastLine: "reading", contextTokens: null, contextPct: null, done: false, malformed: 0, activity: [] },
 	};
 
 	const now = 10_000;
@@ -104,7 +104,7 @@ test("buildDashboardCards keeps a card for a run whose persona is not in the ros
 		status: "running",
 		startedAt: 1_000,
 		finishedAt: null,
-		state: { toolCount: 2, lastLine: "working", contextTokens: null, contextPct: 17, done: false, malformed: 0 },
+		state: { toolCount: 2, lastLine: "working", contextTokens: null, contextPct: 17, done: false, malformed: 0, activity: [] },
 	};
 
 	const now = 5_000;
@@ -145,7 +145,7 @@ test("renderDashboard packs cards into width-fitted rows and yields no lines whe
 		startedAt: 0,
 		finishedAt: null,
 		// lastLine stays null so the only place a persona name can appear is its card title line.
-		state: { toolCount: 1, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0 },
+		state: { toolCount: 1, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0, activity: [] },
 	});
 
 	const personas = [persona("alpha"), persona("bravo")];

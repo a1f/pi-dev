@@ -20,6 +20,8 @@ export interface RunState {
 	done: boolean;
 	/** Count of non-empty lines that failed JSON.parse (skipped, not thrown). */
 	malformed: number;
+	/** Every tool_execution_start as {tool, target}, in stream order (oldest → newest). */
+	activity: ReadonlyArray<{ tool: string; target: string }>;
 }
 
 export interface ReduceOptions {
@@ -73,12 +75,26 @@ function assistantSnapshot(message: unknown): MessageSnapshot {
 	return { line, tokens };
 }
 
+/** Arg keys, in priority order, that best summarize what a tool call acted on. */
+const TARGET_KEYS = ["path", "file", "filePath", "pattern", "command", "cmd", "query", "url"] as const;
+
+/** First non-empty string among TARGET_KEYS in a tool_execution_start's args, else "". */
+function toolTarget(args: unknown): string {
+	if (!isObject(args)) return "";
+	for (const key of TARGET_KEYS) {
+		const value = args[key];
+		if (typeof value === "string" && value !== "") return value;
+	}
+	return "";
+}
+
 export function reduceRunState(lines: Iterable<string>, opts?: ReduceOptions): RunState {
 	let toolCount = 0;
 	let lastLine: string | null = null;
 	let contextTokens: number | null = null;
 	let done = false;
 	let malformed = 0;
+	const activity: { tool: string; target: string }[] = [];
 
 	for (const rawLine of lines) {
 		const line = rawLine.trim();
@@ -93,6 +109,8 @@ export function reduceRunState(lines: Iterable<string>, opts?: ReduceOptions): R
 		if (!isObject(event)) continue;
 		if (event.type === "tool_execution_start") {
 			toolCount += 1;
+			const tool = typeof event.toolName === "string" ? event.toolName : "";
+			activity.push({ tool, target: toolTarget(event.args) });
 		} else if (event.type === "agent_end" && event.willRetry !== true) {
 			done = true;
 		} else if (event.type === "message_end" || event.type === "turn_end") {
@@ -107,7 +125,7 @@ export function reduceRunState(lines: Iterable<string>, opts?: ReduceOptions): R
 		typeof contextWindow === "number" && contextWindow > 0 && contextTokens !== null
 			? (contextTokens / contextWindow) * 100
 			: null;
-	return { toolCount, lastLine, contextTokens, contextPct, done, malformed };
+	return { toolCount, lastLine, contextTokens, contextPct, done, malformed, activity };
 }
 
 export function reduceRunStateFromString(raw: string, opts?: ReduceOptions): RunState {
