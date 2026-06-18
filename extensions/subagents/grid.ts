@@ -5,6 +5,7 @@
 // injected theme and the clock is passed in, so the layout is fully snapshot-stable.
 // No pi runtime, no I/O — slice 4.2 wires the output into a live footer.
 
+import { STATUS_GLYPH, elapsedMs, formatElapsed } from "./format.ts";
 import type { Persona } from "./personas.ts";
 import type { RunRecord, RunStatus } from "./registry.ts";
 
@@ -28,7 +29,7 @@ export function cardFromRecord(record: RunRecord, now: number): GridCard {
 	return {
 		title: record.task,
 		status: record.status,
-		elapsedMs: (record.finishedAt ?? now) - record.startedAt,
+		elapsedMs: elapsedMs(record, now),
 		toolCount: state.toolCount,
 		contextPct: state.contextPct,
 		lastLine: state.lastLine,
@@ -47,7 +48,7 @@ export interface GridTheme {
 
 /** Defaults consistent with registry.ts row glyphs (▶ ▷ ✓ ✗ ⊘); idle gets its own marker. */
 export const DEFAULT_GRID_THEME: GridTheme = {
-	glyph: { running: "▶", queued: "▷", done: "✓", error: "✗", killed: "⊘", idle: "○" },
+	glyph: { ...STATUS_GLYPH, idle: "○" },
 	barFilled: "█",
 	barEmpty: "░",
 	barWidth: 10,
@@ -65,11 +66,6 @@ export function idleCard(persona: Persona): GridCard {
 		lastLine: null,
 		malformed: 0,
 	};
-}
-
-/** Elapsed as whole seconds (matching registry.ts), or an em dash when never started. */
-function elapsedText(card: GridCard): string {
-	return card.elapsedMs === null ? "—" : `${Math.floor(card.elapsedMs / 1000)}s`;
 }
 
 /** A bar of `barWidth` cells, filled in proportion to context usage; all-empty when unknown. */
@@ -119,7 +115,7 @@ function cardLines(card: GridCard, theme: GridTheme): readonly string[] {
 	const marker = card.malformed > 0 ? ` ⚠${card.malformed}` : "";
 	return [
 		fit(`${theme.glyph[card.status]} ${title}`, cardWidth),
-		fit(`${elapsedText(card)} · ${card.toolCount} tools · ${contextBar(card, theme)}${marker}`, cardWidth),
+		fit(`${formatElapsed(card.elapsedMs)} · ${card.toolCount} tools · ${contextBar(card, theme)}${marker}`, cardWidth),
 		fit(lastLine, cardWidth),
 	];
 }
