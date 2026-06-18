@@ -1,0 +1,8 @@
+{
+  "setup": "npm ci",
+  "triggers": ["*.ts", "**/*.ts", "package.json", "tsconfig*.json"],
+  "gates": [
+    { "name": "typecheck", "run": "npm run typecheck", "fix": null },
+    { "name": "test", "run": "npm test", "fix": null }
+  ]
+}

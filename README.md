@@ -123,6 +123,48 @@ The pure policy core (`match.ts`, `rules.ts`, `evaluate.ts`) has no pi
 dependency, so it's unit-tested without launching the agent; `adapter.ts` is
 the only pi-coupled seam and `index.ts` wires it in.
 
+## The `subagents` extension
+
+`extensions/subagents/` (registered in `.pi/settings.json`) dispatches named
+**personas** as headless child pi processes. The main agent — or you, via
+`/agent <persona> <task>` — hands a persona a job; the child runs with its own
+context and restricted tools (guardrails loaded too), streams progress into a
+live grid dashboard, and posts its answer back into the conversation. Tools:
+`agent_dispatch` (optionally `{ persona }`), `agent_status`, `agent_kill`,
+`agent_continue`; commands `/agent`, `/agent-continue`, `/agent-log`. Every run
+is logged to a per-run JSONL (`.pi/agent-logs/`) plus a session audit entry,
+with a per-run timeout, a concurrency cap + FIFO queue, and orphan cleanup at
+session start.
+
+A **persona** is a markdown file in `.pi/agents/` — frontmatter (`name`,
+`description`, `tools`, optional `model`) plus a system-prompt body.
+
+### The `pr-lite` skill
+
+`.pi/skills/pr-lite/` (run with `/skill:pr-lite <task>`) is the demo that ties
+it together: it drives three bundled personas — `coder`, `reviewer`, `critic` —
+through one already-scoped, low-risk PR. The coder self-TDDs the change, the
+language gates run, a 3-reviewer panel plus a critic judge it, one fix round
+lands, and it squashes to a single commit. The skill bundles what the personas
+work against: the coding **rules** (`rules/design-principles.md`,
+`typescript.md`, `tdd.md`), passed to each persona by absolute path, and a
+**gate profile** (`gates/typescript.json` — `npm run typecheck` + `npm test`).
+These are distinct from the guardrails above — guardrails are tool-permission
+policy; these are coding standards the coder writes to and the panel judges
+against.
+
+Develop it like any TypeScript:
+
+```sh
+npm install        # once
+npm run typecheck  # tsc --noEmit (strict)
+npm test           # node --test (pure core: argv / events / personas / grid / queue / …)
+```
+
+The pure core (event parse, state reduce, argv build, persona parse, grid
+render, the FIFO limiter) has no pi dependency and is unit-tested without
+launching the agent; `index.ts` is the pi-coupled seam that wires it in.
+
 ## History
 
 The repo previously included a Docker-based scaffold (Dockerfile,
