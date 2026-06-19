@@ -7,6 +7,7 @@
 
 import type { Persona } from "./personas.ts";
 import type { RunRecord, RunStatus } from "./registry.ts";
+import type { ToolActivity } from "./runstate.ts";
 
 /** A card's status: a run's lifecycle, plus "idle" for a persona with no active run. */
 export type CardStatus = RunStatus | "idle";
@@ -18,7 +19,7 @@ export interface GridCard {
 	elapsedMs: number | null;
 	contextTokens: number | null;
 	contextPct: number | null;
-	activity: ReadonlyArray<{ tool: string; target: string }>;
+	activity: ReadonlyArray<ToolActivity>;
 	lastLine: string | null;
 	malformed: number;
 }
@@ -99,7 +100,7 @@ function formatTokens(tokens: number | null): string {
 
 /** Context usage as a rounded percentage, or an em dash when unknown. */
 function formatPct(pct: number | null): string {
-	return pct === null ? "—" : `${Math.round(pct)}%`;
+	return pct === null || !Number.isFinite(pct) ? "—" : `${Math.round(pct)}%`;
 }
 
 /** A bar of `barWidth` cells, filled in proportion to context usage; all-empty when unknown. */
@@ -155,7 +156,8 @@ function metricsContent(card: GridCard, theme: GridTheme): string {
 }
 
 /** Wrap the fitted metrics content in its context-usage threshold color — amber from 70%, red from 90% — so a near-full context window reads as a warning at a glance. */
-function colorMetrics(fitted: string, card: GridCard, theme: GridTheme): string {
+function colorMetrics(opts: { fitted: string; card: GridCard; theme: GridTheme }): string {
+	const { fitted, card, theme } = opts;
 	const pct = card.contextPct;
 	// Unknown and non-finite usage emit no codes, which keeps a plain (empty-color) theme byte-identical.
 	if (pct === null || !Number.isFinite(pct)) return fitted;
@@ -165,7 +167,7 @@ function colorMetrics(fitted: string, card: GridCard, theme: GridTheme): string 
 }
 
 /** One activity action as a feed line, or a blank line when the slot holds no action. */
-function activityLine(action: { tool: string; target: string } | undefined): string {
+function activityLine(action: ToolActivity | undefined): string {
 	return action === undefined ? "" : ` ▸ ${sanitize(action.tool)}  ${sanitize(action.target)}`;
 }
 
@@ -207,7 +209,7 @@ function cardLines(card: GridCard, theme: GridTheme): readonly string[] {
 	// wrap sitting around the fitted content (and outside the stripe) so the visible width is preserved.
 	const contents = [
 		fit(headerContent(card, theme), field),
-		colorMetrics(fit(metricsContent(card, theme), field), card, theme),
+		colorMetrics({ fitted: fit(metricsContent(card, theme), field), card, theme }),
 		fit(feedUpper, field),
 		fit(feedLower, field),
 	];

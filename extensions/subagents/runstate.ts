@@ -7,6 +7,12 @@
 
 import { isObject, joinTextBlocks } from "./events.ts";
 
+/** One tool action surfaced from the stream — what the dashboard activity feed shows. */
+export interface ToolActivity {
+	tool: string;
+	target: string;
+}
+
 export interface RunState {
 	/** Number of tool_execution_start events seen. */
 	toolCount: number;
@@ -21,7 +27,7 @@ export interface RunState {
 	/** Count of non-empty lines that failed JSON.parse (skipped, not thrown). */
 	malformed: number;
 	/** Every tool_execution_start as {tool, target}, in stream order (oldest → newest). */
-	activity: ReadonlyArray<{ tool: string; target: string }>;
+	activity: ReadonlyArray<ToolActivity>;
 }
 
 export interface ReduceOptions {
@@ -94,7 +100,7 @@ export function reduceRunState(lines: Iterable<string>, opts?: ReduceOptions): R
 	let contextTokens: number | null = null;
 	let done = false;
 	let malformed = 0;
-	const activity: { tool: string; target: string }[] = [];
+	const activity: ToolActivity[] = [];
 
 	for (const rawLine of lines) {
 		const line = rawLine.trim();
