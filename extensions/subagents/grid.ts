@@ -1,7 +1,7 @@
 // Pure renderer for the subagents TUI footer.
 //
 // Turns this session's runs (and idle personas) into a grid of fixed-width cards.
-// Pure and deterministic: the look-and-feel (glyphs, bar characters, widths) is an
+// Pure and deterministic: the look-and-feel (stripe, glyphs, bar characters, widths) is an
 // injected theme and the clock is passed in, so the layout is fully snapshot-stable.
 // No pi runtime, no I/O — slice 4.2 wires the output into a live footer.
 
@@ -16,8 +16,9 @@ export interface GridCard {
 	title: string;
 	status: CardStatus;
 	elapsedMs: number | null;
-	toolCount: number;
+	contextTokens: number | null;
 	contextPct: number | null;
+	activity: ReadonlyArray<{ tool: string; target: string }>;
 	lastLine: string | null;
 	malformed: number;
 }
@@ -29,8 +30,9 @@ export function cardFromRecord(record: RunRecord, now: number): GridCard {
 		title: record.task,
 		status: record.status,
 		elapsedMs: (record.finishedAt ?? now) - record.startedAt,
-		toolCount: state.toolCount,
+		contextTokens: state.contextTokens,
 		contextPct: state.contextPct,
+		activity: state.activity,
 		lastLine: state.lastLine,
 		malformed: state.malformed,
 	};
@@ -38,6 +40,7 @@ export function cardFromRecord(record: RunRecord, now: number): GridCard {
 
 /** Injected look-and-feel — keeps renderGrid pure and snapshot-stable. */
 export interface GridTheme {
+	stripe: Record<CardStatus, string>;
 	glyph: Record<CardStatus, string>;
 	barFilled: string;
 	barEmpty: string;
@@ -45,8 +48,9 @@ export interface GridTheme {
 	cardWidth: number;
 }
 
-/** Defaults consistent with registry.ts row glyphs (▶ ▷ ✓ ✗ ⊘); idle gets its own marker. */
+/** Defaults: a monochrome stripe (per-status color is a later slice) and registry.ts's row glyphs (▶ ▷ ✓ ✗ ⊘); idle gets its own marker. */
 export const DEFAULT_GRID_THEME: GridTheme = {
+	stripe: { running: "▌", queued: "▌", done: "▌", error: "▌", killed: "▌", idle: "▌" },
 	glyph: { running: "▶", queued: "▷", done: "✓", error: "✗", killed: "⊘", idle: "○" },
 	barFilled: "█",
 	barEmpty: "░",
@@ -60,8 +64,9 @@ export function idleCard(persona: Persona): GridCard {
 		title: persona.name,
 		status: "idle",
 		elapsedMs: null,
-		toolCount: 0,
+		contextTokens: null,
 		contextPct: null,
+		activity: [],
 		lastLine: null,
 		malformed: 0,
 	};
@@ -70,6 +75,19 @@ export function idleCard(persona: Persona): GridCard {
 /** Elapsed as whole seconds (matching registry.ts), or an em dash when never started. */
 function elapsedText(card: GridCard): string {
 	return card.elapsedMs === null ? "—" : `${Math.floor(card.elapsedMs / 1000)}s`;
+}
+
+/** Context tokens as a compact magnitude (—, raw, k, or M) so the metrics line stays inside one tight column. */
+function formatTokens(tokens: number | null): string {
+	if (tokens === null) return "—";
+	if (tokens < 1000) return String(tokens);
+	if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1)}k`;
+	return `${(tokens / 1_000_000).toFixed(1)}M`;
+}
+
+/** Context usage as a rounded percentage, or an em dash when unknown. */
+function formatPct(pct: number | null): string {
+	return pct === null ? "—" : `${Math.round(pct)}%`;
 }
 
 /** A bar of `barWidth` cells, filled in proportion to context usage; all-empty when unknown. */
@@ -89,7 +107,7 @@ function contextBar(card: GridCard, theme: GridTheme): string {
  * so they must not reach the footer string slice 4.2 prints.
  */
 function sanitize(text: string): string {
-	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+	return text.replace(/\p{Cc}/gu, "");
 }
 
 /** Pad `content` to exactly `width`, or replace its tail with an ellipsis when it overflows. */
@@ -102,26 +120,71 @@ function fit(content: string, width: number): string {
 }
 
 /** Lines every card occupies — the cards in a row are zipped this many lines deep. */
-const CARD_HEIGHT = 3;
+const CARD_HEIGHT = 4;
+
+/** Columns each rendered line reserves up front for the status stripe and its trailing space. */
+const STRIPE_COLUMNS = 2;
 
 /** Blank columns between adjacent cards in a row. Exported so layout math (columnsForWidth) packs cards with the exact gutter the renderer draws. */
 export const CARD_GUTTER = 2;
 const GUTTER = " ".repeat(CARD_GUTTER);
 
-/** The fixed lines of one card: title, metrics + bar, last output line. */
+/** Header content: `glyph title · status` with elapsed flush right, the left ellipsis-truncated when the two would collide. */
+function headerContent(card: GridCard, theme: GridTheme): string {
+	const field = theme.cardWidth - STRIPE_COLUMNS;
+	const left = `${theme.glyph[card.status]} ${sanitize(card.title)} · ${card.status}`;
+	const elapsed = elapsedText(card);
+	return fit(left, field - Array.from(elapsed).length) + elapsed;
+}
+
+/** Metrics content: a compact token count, the context bar in brackets, then a percentage (one indent space). */
+function metricsContent(card: GridCard, theme: GridTheme): string {
+	return ` ${formatTokens(card.contextTokens)}  [${contextBar(card, theme)}] ${formatPct(card.contextPct)}`;
+}
+
+/** One activity action as a feed line, or a blank line when the slot holds no action. */
+function activityLine(action: { tool: string; target: string } | undefined): string {
+	return action === undefined ? "" : ` ▸ ${sanitize(action.tool)}  ${sanitize(action.target)}`;
+}
+
+/** A terminal card's single feed line — its glyph and final output — or blank when it produced none. */
+function terminalLine(card: GridCard, theme: GridTheme): string {
+	return card.lastLine === null ? "" : ` ${theme.glyph[card.status]} ${sanitize(card.lastLine)}`;
+}
+
+/**
+ * The card's two feed lines (upper, lower): running/queued show their last ≤2 activity actions
+ * oldest-above-newest, terminal cards show their final line then a blank, idle shows two blanks.
+ */
+function feedLines(card: GridCard, theme: GridTheme): readonly [string, string] {
+	switch (card.status) {
+		case "running":
+		case "queued": {
+			const recent = card.activity.slice(-2);
+			return [activityLine(recent[0]), activityLine(recent[1])];
+		}
+		case "done":
+		case "error":
+		case "killed":
+			return [terminalLine(card, theme), ""];
+		case "idle":
+			return ["", ""];
+		default: {
+			const _exhaustive: never = card.status;
+			return _exhaustive;
+		}
+	}
+}
+
+/** The fixed CARD_HEIGHT lines of one card: header, metrics, and a two-line activity/output feed. */
 function cardLines(card: GridCard, theme: GridTheme): readonly string[] {
-	const { cardWidth } = theme;
-	// title and lastLine are untrusted (task text, child output): sanitize before measuring/padding.
-	const title = sanitize(card.title);
-	const lastLine = sanitize(card.lastLine ?? "");
-	// Surface skipped malformed event lines as a ⚠ count; a clean run adds nothing, so its metrics
-	// line stays byte-identical. Appended before fit so the marker is width-clamped like the rest.
-	const marker = card.malformed > 0 ? ` ⚠${card.malformed}` : "";
-	return [
-		fit(`${theme.glyph[card.status]} ${title}`, cardWidth),
-		fit(`${elapsedText(card)} · ${card.toolCount} tools · ${contextBar(card, theme)}${marker}`, cardWidth),
-		fit(lastLine, cardWidth),
-	];
+	const stripe = theme.stripe[card.status];
+	const field = theme.cardWidth - STRIPE_COLUMNS;
+	const [feedUpper, feedLower] = feedLines(card, theme);
+	const contents = [headerContent(card, theme), metricsContent(card, theme), feedUpper, feedLower];
+	// Every line wears the status stripe + a space in its first STRIPE_COLUMNS columns, so content
+	// is fitted to the remaining width and the total visible width stays cardWidth.
+	return contents.map((content) => `${stripe} ${fit(content, field)}`);
 }
 
 /** Render one row of cards side by side: zip their lines, gutter-join, trim each line's tail. */
