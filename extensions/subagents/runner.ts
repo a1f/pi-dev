@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import { buildSpawnArgv } from "./argv.ts";
 import type { SpawnArgvOptions } from "./argv.ts";
-import { RUNS_DIR } from "./constants.ts";
+import { DEFAULT_CONTEXT_WINDOW, RUNS_DIR } from "./constants.ts";
 import { parseEventStream } from "./events.ts";
 import { formatRunLog, isSafeRunId, runLogName } from "./log.ts";
 import { reduceRunStateFromString, type RunState } from "./runstate.ts";
@@ -134,7 +134,7 @@ export async function runAgent(task: string, exec: ExecLike, options?: RunAgentO
 	// signal first, so an un-aborted signal on a killed child means the run hit its own timeout.
 	const timedOut = result.killed && !(signal?.aborted);
 	const parsed = parseEventStream(result.stdout);
-	const state = reduceRunStateFromString(result.stdout);
+	const state = reduceRunStateFromString(result.stdout, { contextWindow: DEFAULT_CONTEXT_WINDOW });
 	// Best-effort logging: a write failure must never derail the dispatch result, and an
 	// unsafe (path-traversing) runId is skipped rather than allowed to escape RUNS_DIR.
 	if (isSafeRunId(runId)) {

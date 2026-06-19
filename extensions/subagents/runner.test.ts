@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { buildSpawnArgv } from "./argv.ts";
-import { RUNS_DIR } from "./constants.ts";
+import { DEFAULT_CONTEXT_WINDOW, RUNS_DIR } from "./constants.ts";
 import { runLogName } from "./log.ts";
 import { type ExecLike, formatReply, type LogWriter, runAgent } from "./runner.ts";
 
@@ -277,4 +277,25 @@ test("runAgent flags a timeout-killed child as timedOut and formatReply surfaces
 	killController.abort();
 	const operatorKill = await runAgent("summarize the README", killedExec, { signal: killController.signal });
 	assert.equal(operatorKill.timedOut, false, "an operator-aborted kill is not a timeout");
+});
+
+test("runAgent populates contextPct from the default context window when the stream carries usage", async () => {
+	// The live dispatch path must fold the child stream against a default context window, so a run
+	// whose usage reports tokens yields a real contextPct — the denominator the dashboard's token
+	// bar needs. Pinned to DEFAULT_CONTEXT_WINDOW rather than a literal percentage so the window's
+	// magnitude can change without rewriting this test. The research-run fixture carries assistant
+	// usage (totalTokens 12345), so contextTokens is non-null and a percentage is computable.
+	const fakeExec: ExecLike = async () => ({
+		stdout: readFixture("research-run.jsonl"),
+		stderr: "",
+		code: 0,
+		killed: false,
+	});
+
+	const result = await runAgent("research the codebase", fakeExec);
+
+	const { contextTokens, contextPct } = result.state;
+	assert.ok(contextTokens !== null, "the research-run fixture must carry assistant usage");
+	assert.notEqual(contextPct, null, "the live path must inject a default window so usage yields a percentage");
+	assert.equal(contextPct, (contextTokens / DEFAULT_CONTEXT_WINDOW) * 100);
 });
