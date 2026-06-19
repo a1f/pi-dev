@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { DEFAULT_GRID_THEME, cardFromRecord, idleCard, renderGrid } from "./grid.ts";
-import type { GridCard, GridTheme } from "./grid.ts";
+import type { CardStatus, GridCard, GridTheme } from "./grid.ts";
 import type { Persona } from "./personas.ts";
 import type { RunRecord } from "./registry.ts";
 import type { RunState } from "./runstate.ts";
@@ -121,6 +121,10 @@ const snapshotTheme: GridTheme = {
 	barEmpty: "-",
 	barWidth: 4,
 	cardWidth: 28,
+	// Color disabled: empty reset/threshold make the metrics-color wrap a no-op, so every layout
+	// golden below stays byte-identical. The spread-derived themes inherit these no-color fields.
+	reset: "",
+	threshold: { warn: "", crit: "" },
 };
 
 // A representative mix exercising every feed path and token magnitude: a running card with >2
@@ -247,7 +251,7 @@ test("renderGrid truncates the header on a whole code point, never splitting an 
 	assert.equal(out.split("\n")[0], "> R ab🚀…1s");
 });
 
-test("renderGrid draws the default monochrome stripe and a bar that clamps unknown, non-finite, and over-range context", () => {
+test("renderGrid prefixes each line with the default theme's status stripe and clamps unknown, non-finite, and over-range context", () => {
 	const base: GridCard = {
 		title: "scout",
 		status: "running",
@@ -260,8 +264,8 @@ test("renderGrid draws the default monochrome stripe and a bar that clamps unkno
 	};
 	const render = (contextPct: number | null): string => renderGrid({ cards: [{ ...base, contextPct }], columns: 1, theme: DEFAULT_GRID_THEME });
 
-	// Every default line wears the monochrome "▌" stripe in its two reserved columns.
-	assert.ok((render(50).split("\n")[0] ?? "").startsWith("▌ "), render(50));
+	// Every default line opens with the theme's running stripe in its two reserved columns.
+	assert.ok((render(50).split("\n")[0] ?? "").startsWith(`${DEFAULT_GRID_THEME.stripe.running} `), render(50));
 	// 50% of the default 10-cell bar → five filled, five empty.
 	assert.ok(render(50).includes("█████░░░░░"), render(50));
 	// Unknown and non-finite context collapse to an all-empty bar, never a zero-width one.
@@ -269,6 +273,58 @@ test("renderGrid draws the default monochrome stripe and a bar that clamps unkno
 	assert.ok(render(Number.NaN).includes("░░░░░░░░░░"), render(Number.NaN));
 	// Over-range context clamps to a fully filled bar.
 	assert.ok(render(150).includes("██████████"), render(150));
+});
+
+test("DEFAULT_GRID_THEME colors each status stripe with its documented SGR code while keeping the ▌ bar", () => {
+	// AC#1: the shipped stripe is no longer a bare "▌" — each status carries its own ANSI color,
+	// kept entirely in the theme value so the renderer stays color-agnostic.
+	const expected: ReadonlyArray<readonly [CardStatus, string]> = [
+		["running", "\x1b[36m"],
+		["done", "\x1b[32m"],
+		["idle", "\x1b[2m"],
+		["queued", "\x1b[33m"],
+		["error", "\x1b[31m"],
+		["killed", "\x1b[35m"],
+	];
+	for (const [status, sgr] of expected) {
+		const stripe = DEFAULT_GRID_THEME.stripe[status];
+		assert.ok(stripe.includes("▌"), `expected ${status} stripe to keep the ▌ bar, got ${JSON.stringify(stripe)}`);
+		assert.ok(stripe.includes(sgr), `expected ${status} stripe to carry SGR ${JSON.stringify(sgr)}, got ${JSON.stringify(stripe)}`);
+	}
+});
+
+test("renderGrid wraps the metrics line in threshold color from amber at 70% and red at 90%, and not below", () => {
+	// AC#2: sentinel markers (visible, not real ANSI) make the wrap deterministic. The threshold
+	// color wraps the already-fitted metrics content, outside the stripe, only on the metrics line.
+	const theme: GridTheme = { ...snapshotTheme, reset: "<0>", threshold: { warn: "<W>", crit: "<C>" } };
+	const base: GridCard = {
+		title: "scout",
+		status: "running",
+		elapsedMs: 1000,
+		contextTokens: 1000,
+		contextPct: 50,
+		activity: [],
+		lastLine: null,
+		malformed: 0,
+	};
+	const metricsLine = (contextPct: number | null): string =>
+		renderGrid({ cards: [{ ...base, contextPct }], columns: 1, theme }).split("\n")[1] ?? "";
+
+	// Amber from 70 up to (but not including) 90: warn prefix + reset around the fitted content.
+	for (const pct of [70, 89]) {
+		const line = metricsLine(pct);
+		assert.ok(line.includes("<W>") && line.includes("<0>"), `expected amber wrap at ${pct}%, got ${JSON.stringify(line)}`);
+	}
+	// Red from 90 up.
+	for (const pct of [90, 100]) {
+		const line = metricsLine(pct);
+		assert.ok(line.includes("<C>") && line.includes("<0>"), `expected red wrap at ${pct}%, got ${JSON.stringify(line)}`);
+	}
+	// Below 70 and unknown context emit no threshold codes at all.
+	for (const pct of [69, null]) {
+		const line = metricsLine(pct);
+		assert.ok(!line.includes("<W>") && !line.includes("<C>"), `expected no threshold wrap at ${JSON.stringify(pct)}, got ${JSON.stringify(line)}`);
+	}
 });
 
 test("renderGrid clamps a non-positive column count to a single column", () => {

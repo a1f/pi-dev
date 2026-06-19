@@ -46,16 +46,28 @@ export interface GridTheme {
 	barEmpty: string;
 	barWidth: number;
 	cardWidth: number;
+	reset: string;
+	threshold: { warn: string; crit: string };
 }
 
-/** Defaults: a monochrome stripe (per-status color is a later slice) and registry.ts's row glyphs (▶ ▷ ✓ ✗ ⊘); idle gets its own marker. */
+/** Defaults: ANSI-colored ▌ stripes and amber/red threshold tints live only in the theme so renderGrid stays color-agnostic; glyphs are registry.ts's row markers (▶ ▷ ✓ ✗ ⊘) plus an idle ○. */
 export const DEFAULT_GRID_THEME: GridTheme = {
-	stripe: { running: "▌", queued: "▌", done: "▌", error: "▌", killed: "▌", idle: "▌" },
+	// Stripe color per status: cyan running, amber queued, green done, red error, magenta killed, dim idle.
+	stripe: {
+		running: "\x1b[36m▌\x1b[0m",
+		queued: "\x1b[33m▌\x1b[0m",
+		done: "\x1b[32m▌\x1b[0m",
+		error: "\x1b[31m▌\x1b[0m",
+		killed: "\x1b[35m▌\x1b[0m",
+		idle: "\x1b[2m▌\x1b[0m",
+	},
 	glyph: { running: "▶", queued: "▷", done: "✓", error: "✗", killed: "⊘", idle: "○" },
 	barFilled: "█",
 	barEmpty: "░",
 	barWidth: 10,
 	cardWidth: 28,
+	reset: "\x1b[0m",
+	threshold: { warn: "\x1b[33m", crit: "\x1b[31m" },
 };
 
 /** A persona with no active run → an idle card (started nothing, did nothing). */
@@ -142,6 +154,16 @@ function metricsContent(card: GridCard, theme: GridTheme): string {
 	return ` ${formatTokens(card.contextTokens)}  [${contextBar(card, theme)}] ${formatPct(card.contextPct)}`;
 }
 
+/** Wrap the fitted metrics content in its context-usage threshold color — amber from 70%, red from 90% — so a near-full context window reads as a warning at a glance. */
+function colorMetrics(fitted: string, card: GridCard, theme: GridTheme): string {
+	const pct = card.contextPct;
+	// Unknown and non-finite usage emit no codes, which keeps a plain (empty-color) theme byte-identical.
+	if (pct === null || !Number.isFinite(pct)) return fitted;
+	if (pct >= 90) return `${theme.threshold.crit}${fitted}${theme.reset}`;
+	if (pct >= 70) return `${theme.threshold.warn}${fitted}${theme.reset}`;
+	return fitted;
+}
+
 /** One activity action as a feed line, or a blank line when the slot holds no action. */
 function activityLine(action: { tool: string; target: string } | undefined): string {
 	return action === undefined ? "" : ` ▸ ${sanitize(action.tool)}  ${sanitize(action.target)}`;
@@ -181,10 +203,17 @@ function cardLines(card: GridCard, theme: GridTheme): readonly string[] {
 	const stripe = theme.stripe[card.status];
 	const field = theme.cardWidth - STRIPE_COLUMNS;
 	const [feedUpper, feedLower] = feedLines(card, theme);
-	const contents = [headerContent(card, theme), metricsContent(card, theme), feedUpper, feedLower];
-	// Every line wears the status stripe + a space in its first STRIPE_COLUMNS columns, so content
-	// is fitted to the remaining width and the total visible width stays cardWidth.
-	return contents.map((content) => `${stripe} ${fit(content, field)}`);
+	// Each content is fitted to the field width; only the metrics line is then threshold-colored, the
+	// wrap sitting around the fitted content (and outside the stripe) so the visible width is preserved.
+	const contents = [
+		fit(headerContent(card, theme), field),
+		colorMetrics(fit(metricsContent(card, theme), field), card, theme),
+		fit(feedUpper, field),
+		fit(feedLower, field),
+	];
+	// Every line wears the status stripe + a space in its first STRIPE_COLUMNS columns, so the total
+	// visible width stays cardWidth.
+	return contents.map((content) => `${stripe} ${content}`);
 }
 
 /** Render one row of cards side by side: zip their lines, gutter-join, trim each line's tail. */

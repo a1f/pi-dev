@@ -130,6 +130,9 @@ test("renderDashboard packs cards into width-fitted rows and yields no lines whe
 		barEmpty: ".",
 		barWidth: 3,
 		cardWidth: 22,
+		// No-color theme: empty reset/threshold leave the metrics content unwrapped.
+		reset: "",
+		threshold: { warn: "", crit: "" },
 	};
 	const persona = (name: string): Persona => ({
 		name,
