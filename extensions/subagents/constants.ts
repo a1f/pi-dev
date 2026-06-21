@@ -20,7 +20,7 @@ export const DASHBOARD_WIDGET = "subagents";
 /** How often (ms) the dashboard re-renders while any run is live, so elapsed time animates between handler calls. */
 export const DASHBOARD_REFRESH_MS = 1000;
 
-/** Default context-window size (tokens) used as the dashboard token-bar denominator when the session/stream reports usage but no window of its own. */
+/** Fallback context-window size (tokens) for the dashboard token-bar denominator, used only when the active model exposes no context window of its own. */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 /** Per-run JSONL logs land here, relative to the project cwd. */

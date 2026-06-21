@@ -299,3 +299,22 @@ test("runAgent populates contextPct from the default context window when the str
 	assert.notEqual(contextPct, null, "the live path must inject a default window so usage yields a percentage");
 	assert.equal(contextPct, (contextTokens / DEFAULT_CONTEXT_WINDOW) * 100);
 });
+
+test("runAgent uses a caller-provided context window for contextPct, overriding the default", async () => {
+	// The dashboard sources the denominator from the active model's context window; runAgent must honor
+	// an explicit contextWindow rather than always dividing by DEFAULT_CONTEXT_WINDOW (so a 1M-context
+	// model is not measured against a fixed 200k).
+	const fakeExec: ExecLike = async () => ({
+		stdout: readFixture("research-run.jsonl"),
+		stderr: "",
+		code: 0,
+		killed: false,
+	});
+
+	const result = await runAgent("research the codebase", fakeExec, { contextWindow: 1_000_000 });
+
+	const { contextTokens, contextPct } = result.state;
+	assert.ok(contextTokens !== null, "the research-run fixture must carry assistant usage");
+	assert.equal(contextPct, (contextTokens / 1_000_000) * 100, "contextPct must divide by the provided window");
+	assert.notEqual(contextPct, (contextTokens / DEFAULT_CONTEXT_WINDOW) * 100, "the override must not fall back to the default window");
+});
