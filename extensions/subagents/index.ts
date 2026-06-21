@@ -282,6 +282,10 @@ export default function (pi: ExtensionAPI, deps: SubagentDeps = {}): void {
 				extensions: [GUARDRAILS_EXTENSION],
 				tools: persona?.tools ?? undefined,
 				model: persona?.model ?? undefined,
+				// Denominator for the dashboard token bar: the parent session's active-model context
+				// window, so a large-context model is not measured against a fixed 200k. runAgent falls
+				// back to DEFAULT_CONTEXT_WINDOW when no model (or model window) is available.
+				contextWindow: ctx.model?.contextWindow,
 				// An empty/whitespace-only persona body trims to "" upstream; map it to undefined so
 				// buildSpawnArgv omits --system-prompt and the child keeps its default, rather than
 				// emitting `--system-prompt ""` and replacing that default with nothing. The continue

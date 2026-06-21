@@ -47,7 +47,7 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 		status: "done",
 		startedAt: 1_000,
 		finishedAt: 4_000,
-		state: { toolCount: 3, lastLine: "first pass", contextTokens: null, contextPct: null, done: true, malformed: 0 },
+		state: { toolCount: 3, lastLine: "first pass", contextTokens: null, contextPct: null, done: true, malformed: 0, activity: [] },
 	};
 	const scoutLatest: RunRecord = {
 		runId: "scout-2",
@@ -56,7 +56,7 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 		status: "running",
 		startedAt: 5_000,
 		finishedAt: null,
-		state: { toolCount: 7, lastLine: "second pass", contextTokens: null, contextPct: 42, done: false, malformed: 0 },
+		state: { toolCount: 7, lastLine: "second pass", contextTokens: null, contextPct: 42, done: false, malformed: 0, activity: [] },
 	};
 	const personaLess: RunRecord = {
 		runId: "loose-1",
@@ -65,7 +65,7 @@ test("buildDashboardCards yields one titled card per persona, then a card per pe
 		status: "running",
 		startedAt: 6_000,
 		finishedAt: null,
-		state: { toolCount: 1, lastLine: "reading", contextTokens: null, contextPct: null, done: false, malformed: 0 },
+		state: { toolCount: 1, lastLine: "reading", contextTokens: null, contextPct: null, done: false, malformed: 0, activity: [] },
 	};
 
 	const now = 10_000;
@@ -104,7 +104,7 @@ test("buildDashboardCards keeps a card for a run whose persona is not in the ros
 		status: "running",
 		startedAt: 1_000,
 		finishedAt: null,
-		state: { toolCount: 2, lastLine: "working", contextTokens: null, contextPct: 17, done: false, malformed: 0 },
+		state: { toolCount: 2, lastLine: "working", contextTokens: null, contextPct: 17, done: false, malformed: 0, activity: [] },
 	};
 
 	const now = 5_000;
@@ -120,14 +120,19 @@ test("buildDashboardCards keeps a card for a run whose persona is not in the ros
 });
 
 test("renderDashboard packs cards into width-fitted rows and yields no lines when empty", () => {
-	// A small ascii theme makes the column math predictable: cardWidth 10 + the 2-column gutter
-	// is a 12-column stride, so a width of 24 fits two cards across and a width of 10 fits one.
+	// A small ascii theme makes the column math predictable: cardWidth 22 + the 2-column gutter is a
+	// 24-column stride, so a width of 48 fits two cards across and a width of 22 fits one. The card is
+	// wide enough that the variant-A header (which now carries the persona name) does not truncate it.
 	const theme: GridTheme = {
+		stripe: { running: "|", queued: ":", done: "=", error: "!", killed: "x", idle: "." },
 		glyph: { running: "R", queued: "Q", done: "D", error: "E", killed: "K", idle: "I" },
 		barFilled: "#",
 		barEmpty: ".",
 		barWidth: 3,
-		cardWidth: 10,
+		cardWidth: 22,
+		// No-color theme: empty reset/threshold leave the metrics content unwrapped.
+		reset: "",
+		threshold: { warn: "", crit: "" },
 	};
 	const persona = (name: string): Persona => ({
 		name,
@@ -145,7 +150,7 @@ test("renderDashboard packs cards into width-fitted rows and yields no lines whe
 		startedAt: 0,
 		finishedAt: null,
 		// lastLine stays null so the only place a persona name can appear is its card title line.
-		state: { toolCount: 1, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0 },
+		state: { toolCount: 1, lastLine: null, contextTokens: null, contextPct: null, done: false, malformed: 0, activity: [] },
 	});
 
 	const personas = [persona("alpha"), persona("bravo")];
@@ -153,7 +158,7 @@ test("renderDashboard packs cards into width-fitted rows and yields no lines whe
 	const now = 1_000;
 
 	// Two columns: both persona cards share the first row, so both titles land on the first line.
-	const wide = renderDashboard({ records, personas, now, width: 24, theme });
+	const wide = renderDashboard({ records, personas, now, width: 48, theme });
 	assert.ok(Array.isArray(wide), "renderDashboard returns an array of lines");
 	const firstLine = wide[0] ?? "";
 	assert.ok(
@@ -162,7 +167,7 @@ test("renderDashboard packs cards into width-fitted rows and yields no lines whe
 	);
 
 	// One column: the same two cards stack, so no single line carries both titles.
-	const narrow = renderDashboard({ records, personas, now, width: 10, theme });
+	const narrow = renderDashboard({ records, personas, now, width: 22, theme });
 	const sharedLine = narrow.find((line) => line.includes("alpha") && line.includes("bravo"));
 	assert.equal(
 		sharedLine,

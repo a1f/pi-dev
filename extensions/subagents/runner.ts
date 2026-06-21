@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import { buildSpawnArgv } from "./argv.ts";
 import type { SpawnArgvOptions } from "./argv.ts";
-import { RUNS_DIR } from "./constants.ts";
+import { DEFAULT_CONTEXT_WINDOW, RUNS_DIR } from "./constants.ts";
 import { parseEventStream } from "./events.ts";
 import { formatRunLog, isSafeRunId, runLogName } from "./log.ts";
 import { reduceRunStateFromString, type RunState } from "./runstate.ts";
@@ -75,6 +75,7 @@ export const EMPTY_RUN_STATE: RunState = {
 	contextPct: null,
 	done: false,
 	malformed: 0,
+	activity: [],
 };
 
 /** Per-process counter so two same-millisecond dispatches never derive the same run id. */
@@ -104,6 +105,8 @@ export interface RunAgentOptions extends Pick<SpawnArgvOptions, "tools" | "model
 	runId?: string;
 	/** Cancels the child when aborted, so agent_kill can stop a running run. */
 	signal?: AbortSignal;
+	/** Context-window size (tokens) for the run's contextPct denominator; falls back to DEFAULT_CONTEXT_WINDOW when the caller resolves no model window. */
+	contextWindow?: number;
 }
 
 /** Dispatch a one-shot pi child for `task` and report its parsed outcome. */
@@ -116,7 +119,7 @@ export async function runAgent(task: string, exec: ExecLike, options?: RunAgentO
 	}
 	// Split dispatch controls from the spawn knobs; `spawn` is exactly SpawnArgvOptions minus
 	// `task`, so it forwards into buildSpawnArgv as-is without re-listing each field.
-	const { timeoutMs, cwd, writeLog = noopWriteLog, runId: requestedRunId, signal, ...spawn } = options ?? {};
+	const { timeoutMs, cwd, writeLog = noopWriteLog, runId: requestedRunId, signal, contextWindow, ...spawn } = options ?? {};
 	let argv: string[];
 	try {
 		argv = buildSpawnArgv({ task, ...spawn });
@@ -133,7 +136,7 @@ export async function runAgent(task: string, exec: ExecLike, options?: RunAgentO
 	// signal first, so an un-aborted signal on a killed child means the run hit its own timeout.
 	const timedOut = result.killed && !(signal?.aborted);
 	const parsed = parseEventStream(result.stdout);
-	const state = reduceRunStateFromString(result.stdout);
+	const state = reduceRunStateFromString(result.stdout, { contextWindow: contextWindow ?? DEFAULT_CONTEXT_WINDOW });
 	// Best-effort logging: a write failure must never derail the dispatch result, and an
 	// unsafe (path-traversing) runId is skipped rather than allowed to escape RUNS_DIR.
 	if (isSafeRunId(runId)) {
