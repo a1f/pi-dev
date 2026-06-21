@@ -4,19 +4,11 @@
 // timing, and latest folded RunState — keyed by runId so the parent can look one
 // up or list them all. Pure in-memory bookkeeping: no I/O lives here.
 
+import { STATUS_GLYPH, elapsedMs, formatElapsed } from "./format.ts";
 import type { RunState } from "./runstate.ts";
 
 /** Lifecycle of a run: queued for a slot, live, finished cleanly or with an error, or killed. */
 export type RunStatus = "running" | "queued" | "done" | "error" | "killed";
-
-/** Single-glyph status marker shown at the head of each rendered row. */
-const STATUS_GLYPH: Record<RunStatus, string> = {
-	running: "▶",
-	queued: "▷",
-	done: "✓",
-	error: "✗",
-	killed: "⊘",
-};
 
 /** The live record the registry keeps for one dispatched run. */
 export interface RunRecord {
@@ -98,12 +90,12 @@ export class RunRegistry {
 /** Render one run as a single status line; adds a malformed-line cell only when the count is nonzero, and omits the last-line cell when the run has produced none. */
 function renderRow(record: RunRecord, now: number): string {
 	const { state } = record;
-	const elapsedMs = (record.finishedAt ?? now) - record.startedAt;
+	const elapsed = elapsedMs(record, now);
 	const context = state.contextPct === null ? "—" : `${Math.round(state.contextPct)}%`;
 	const cells = [
 		STATUS_GLYPH[record.status],
 		record.task,
-		`${Math.floor(elapsedMs / 1000)}s`,
+		formatElapsed(elapsed),
 		`${state.toolCount} tools`,
 		context,
 	];

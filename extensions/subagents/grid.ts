@@ -5,6 +5,7 @@
 // injected theme and the clock is passed in, so the layout is fully snapshot-stable.
 // No pi runtime, no I/O — slice 4.2 wires the output into a live footer.
 
+import { STATUS_GLYPH, elapsedMs, formatElapsed } from "./format.ts";
 import type { Persona } from "./personas.ts";
 import type { RunRecord, RunStatus } from "./registry.ts";
 import type { ToolActivity } from "./runstate.ts";
@@ -30,7 +31,7 @@ export function cardFromRecord(record: RunRecord, now: number): GridCard {
 	return {
 		title: record.task,
 		status: record.status,
-		elapsedMs: (record.finishedAt ?? now) - record.startedAt,
+		elapsedMs: elapsedMs(record, now),
 		contextTokens: state.contextTokens,
 		contextPct: state.contextPct,
 		activity: state.activity,
@@ -62,7 +63,8 @@ export const DEFAULT_GRID_THEME: GridTheme = {
 		killed: "\x1b[35m▌\x1b[0m",
 		idle: "\x1b[2m▌\x1b[0m",
 	},
-	glyph: { running: "▶", queued: "▷", done: "✓", error: "✗", killed: "⊘", idle: "○" },
+	// Lifecycle glyphs reuse format.ts's shared STATUS_GLYPH so rows and cards stay identical; idle is card-only.
+	glyph: { ...STATUS_GLYPH, idle: "○" },
 	barFilled: "█",
 	barEmpty: "░",
 	barWidth: 10,
@@ -83,11 +85,6 @@ export function idleCard(persona: Persona): GridCard {
 		lastLine: null,
 		malformed: 0,
 	};
-}
-
-/** Elapsed as whole seconds (matching registry.ts), or an em dash when never started. */
-function elapsedText(card: GridCard): string {
-	return card.elapsedMs === null ? "—" : `${Math.floor(card.elapsedMs / 1000)}s`;
 }
 
 /** Context tokens as a compact magnitude (—, raw, k, or M) so the metrics line stays inside one tight column. */
@@ -146,7 +143,7 @@ const GUTTER = " ".repeat(CARD_GUTTER);
 function headerContent(card: GridCard, theme: GridTheme): string {
 	const field = theme.cardWidth - STRIPE_COLUMNS;
 	const left = `${theme.glyph[card.status]} ${sanitize(card.title)} · ${card.status}`;
-	const elapsed = elapsedText(card);
+	const elapsed = formatElapsed(card.elapsedMs);
 	return fit(left, field - Array.from(elapsed).length) + elapsed;
 }
 
