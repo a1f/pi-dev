@@ -148,3 +148,30 @@ test("loadPersonas returns nothing for a cwd without a .pi/agents directory", ()
 	assert.deepEqual(personas, []);
 	assert.deepEqual(warnings, []);
 });
+
+test("loadPersonas loads a persona from the global agent dir when the project has no .pi/agents", () => {
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// A project cwd that exists but has no .pi/agents of its own — the only source is the global one.
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+
+		// pi's global agent root holds one valid persona under its agents/ subdirectory.
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "globalcoder.md"),
+			"---\nname: globalcoder\ndescription: A globally-installed coder.\n---\nYou are a coder.",
+		);
+
+		const { personas, warnings } = loadPersonas(cwd, agentDir);
+		assert.deepEqual(
+			personas.map((persona) => persona.name),
+			["globalcoder"],
+		);
+		assert.deepEqual(warnings, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
