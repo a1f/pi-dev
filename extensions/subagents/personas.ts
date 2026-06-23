@@ -86,8 +86,9 @@ export function resolveDispatch(args: string, personas: readonly Persona[]): { p
 }
 
 /**
- * Load personas from pi's two agent roots — the global agent dir and the project's `<cwd>/.pi/` —
- * concatenating their personas and warnings (global first). Each directory is scanned independently:
+ * Load personas from pi's two agent roots — the global agent dir and the project's `<cwd>/.pi/`.
+ * On a name collision the project persona wins, so each name appears exactly once; warnings from
+ * both roots are concatenated (global first). Each directory is scanned independently:
  * a missing one contributes nothing; malformed files are skipped and reported in `warnings`.
  * `agentDir` defaults to pi core's getAgentDir resolution: the `PI_CODING_AGENT_DIR` override, else
  * `~/.pi/agent`.
@@ -98,8 +99,14 @@ export function loadPersonas(
 ): { personas: Persona[]; warnings: string[] } {
 	const fromGlobal = loadPersonasFromDir(join(agentDir, AGENTS_DIRNAME));
 	const fromProject = loadPersonasFromDir(join(cwd, ".pi", AGENTS_DIRNAME));
+	// Dedupe by name with project precedence: seed the map with the global personas, then let the
+	// project personas overwrite any shared name, so a collision resolves to the project file and
+	// each name appears exactly once.
+	const byName = new Map<string, Persona>();
+	for (const persona of fromGlobal.personas) byName.set(persona.name, persona);
+	for (const persona of fromProject.personas) byName.set(persona.name, persona);
 	return {
-		personas: [...fromGlobal.personas, ...fromProject.personas],
+		personas: [...byName.values()],
 		warnings: [...fromGlobal.warnings, ...fromProject.warnings],
 	};
 }

@@ -175,3 +175,41 @@ test("loadPersonas loads a persona from the global agent dir when the project ha
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("loadPersonas prefers the project persona on a name collision and lists it only once", () => {
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// Both the project and the global agent dir define a persona named "shared"; project wins.
+		const cwd = join(root, "project");
+		const projectAgents = join(cwd, ".pi", "agents");
+		mkdirSync(projectAgents, { recursive: true });
+		writeFileSync(
+			join(projectAgents, "shared.md"),
+			"---\nname: shared\ndescription: Project shared persona.\n---\nProject body.",
+		);
+
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "shared.md"),
+			"---\nname: shared\ndescription: Global shared persona.\n---\nGlobal body.",
+		);
+		writeFileSync(
+			join(globalAgents, "globalonly.md"),
+			"---\nname: globalonly\ndescription: A global-only persona.\n---\nGlobal-only body.",
+		);
+
+		const { personas } = loadPersonas(cwd, agentDir);
+
+		// The colliding name yields exactly one persona, resolved to the project file.
+		assert.equal(personas.filter((persona) => persona.name === "shared").length, 1);
+		const shared = personas.find((persona) => persona.name === "shared");
+		assert.equal(shared?.source, join(cwd, ".pi", "agents", "shared.md"));
+
+		// A persona that exists only in the global dir still loads.
+		assert.ok(personas.some((persona) => persona.name === "globalonly"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
