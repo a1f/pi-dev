@@ -111,7 +111,8 @@ test("resolveDispatch treats an unrecognized first token as part of the task, no
 });
 
 test("loadPersonas returns valid personas in filename order and warns about a malformed file", () => {
-	const { personas, warnings } = loadPersonas(workspace);
+	// Isolate the project source: point the global agent dir at a path with no agents/ subdir.
+	const { personas, warnings } = loadPersonas(workspace, join(here, "fixtures", "no-such-agent-dir"));
 	assert.deepEqual(
 		personas.map((persona) => persona.name),
 		["reviewer", "summarizer"],
@@ -131,7 +132,8 @@ test("loadPersonas skips a .md entry that is a directory, warning instead of thr
 		writeFileSync(join(agents, "valid.md"), "---\nname: valid\ndescription: A real persona.\n---\nBody.");
 		mkdirSync(join(agents, "notapersona.md")); // a directory whose name ends in .md → readFileSync throws EISDIR
 
-		const { personas, warnings } = loadPersonas(root);
+		// Point the global agent dir at a sibling with no agents/ subdir so only the project source is scanned.
+		const { personas, warnings } = loadPersonas(root, join(root, "agent"));
 		assert.deepEqual(
 			personas.map((persona) => persona.name),
 			["valid"],
@@ -144,7 +146,8 @@ test("loadPersonas skips a .md entry that is a directory, warning instead of thr
 });
 
 test("loadPersonas returns nothing for a cwd without a .pi/agents directory", () => {
-	const { personas, warnings } = loadPersonas(join(here, "fixtures", "no-such-workspace"));
+	// Both sources absent: no project .pi/agents, and a global dir with no agents/ subdir → nothing loads.
+	const { personas, warnings } = loadPersonas(join(here, "fixtures", "no-such-workspace"), join(here, "fixtures", "no-such-agent-dir"));
 	assert.deepEqual(personas, []);
 	assert.deepEqual(warnings, []);
 });
@@ -209,6 +212,35 @@ test("loadPersonas prefers the project persona on a name collision and lists it 
 
 		// A persona that exists only in the global dir still loads.
 		assert.ok(personas.some((persona) => persona.name === "globalonly"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("loadPersonas skips a malformed file in the global agent dir and reports it in warnings", () => {
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// A project cwd that exists but has no .pi/agents of its own — the only source is the global one.
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+
+		// The global agent root holds one valid persona plus a malformed file (no `---` fence).
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "globalcoder.md"),
+			"---\nname: globalcoder\ndescription: A globally-installed coder.\n---\nYou are a coder.",
+		);
+		writeFileSync(join(globalAgents, "broken.md"), "no frontmatter fence here");
+
+		const { personas, warnings } = loadPersonas(cwd, agentDir);
+		assert.deepEqual(
+			personas.map((persona) => persona.name),
+			["globalcoder"],
+		);
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0] ?? "", /broken\.md/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
