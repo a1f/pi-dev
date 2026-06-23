@@ -8,9 +8,10 @@
 // No pi runtime, no child_process, no mutation — it only reads from disk.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { PERSONA_ERRORS } from "./constants.ts";
 
@@ -87,15 +88,16 @@ export function resolveDispatch(args: string, personas: readonly Persona[]): { p
 
 /**
  * Load personas from pi's two agent roots — the global agent dir and the project's `<cwd>/.pi/`.
- * On a name collision the project persona wins, so each name appears exactly once; warnings from
- * both roots are concatenated (global first). Each directory is scanned independently:
- * a missing one contributes nothing; malformed files are skipped and reported in `warnings`.
- * `agentDir` defaults to pi core's getAgentDir resolution: the `PI_CODING_AGENT_DIR` override, else
- * `~/.pi/agent`.
+ * Global personas come first in filename order, then project-only personas; a project persona that
+ * collides with a global name replaces it in place, keeping the global slot. This parallels the
+ * warning order, which lists global warnings before project ones. On a collision the project
+ * persona wins, so each name appears exactly once. Each directory is scanned independently: a
+ * missing one contributes nothing; malformed files are skipped and reported in `warnings`.
+ * `agentDir` defaults to pi core's `getAgentDir()` (the `PI_CODING_AGENT_DIR` override, else `~/.pi/agent`).
  */
 export function loadPersonas(
 	cwd: string,
-	agentDir: string = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
+	agentDir: string = getAgentDir(),
 ): { personas: Persona[]; warnings: string[] } {
 	const fromGlobal = loadPersonasFromDir(join(agentDir, AGENTS_DIRNAME));
 	const fromProject = loadPersonasFromDir(join(cwd, ".pi", AGENTS_DIRNAME));

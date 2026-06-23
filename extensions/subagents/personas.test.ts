@@ -245,3 +245,36 @@ test("loadPersonas skips a malformed file in the global agent dir and reports it
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("loadPersonas resolves the global agent dir from PI_CODING_AGENT_DIR when called with a single argument", () => {
+	// Exercises the production default: with no agentDir argument, the global dir comes from
+	// getAgentDir(), which reads PI_CODING_AGENT_DIR. Save/restore the env so the test is isolated.
+	const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// The env-pointed global agent dir (absolute) holds one valid persona under its agents/.
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "envcoder.md"),
+			"---\nname: envcoder\ndescription: A persona under the env-pointed global dir.\n---\nYou are a coder.",
+		);
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		// A project cwd with no .pi/agents of its own, so the single-argument call's only source is
+		// the global dir that the default getAgentDir() resolution derives from the env var.
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+
+		const { personas } = loadPersonas(cwd);
+		assert.deepEqual(
+			personas.map((persona) => persona.name),
+			["envcoder"],
+		);
+	} finally {
+		if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
