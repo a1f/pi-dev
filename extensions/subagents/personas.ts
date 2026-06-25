@@ -1,8 +1,9 @@
-// Persona frontmatter parser + project-scoped directory scan for subagents.
+// Persona frontmatter parser + agent-directory scan (global + project) for subagents.
 //
 // Pure and total, mirroring guardrails/rules.ts (load → parse → warn): parsePersona
 // maps a markdown string to a Persona or an error and never throws on bad input, and
-// loadPersonas reads <cwd>/.pi/agents/*.md, skipping malformed files with a warning.
+// loadPersonas reads *.md from the global agent dir and <cwd>/.pi/agents, skipping
+// malformed files with a warning.
 // resolveDispatch (pure, no I/O) splits a `/agent` argument into a persona + task.
 // No pi runtime, no child_process, no mutation — it only reads from disk.
 
@@ -10,9 +11,11 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+
 import { PERSONA_ERRORS } from "./constants.ts";
 
-/** Subdirectory of `<cwd>/.pi/` that holds persona markdown files. */
+/** Name of the directory that holds persona markdown files, under both `<cwd>/.pi/` and the global agent dir. */
 export const AGENTS_DIRNAME = "agents";
 
 export interface Persona {
@@ -84,12 +87,38 @@ export function resolveDispatch(args: string, personas: readonly Persona[]): { p
 }
 
 /**
- * Load every persona under `<cwd>/.pi/agents/*.md` in filename order (project-scoped,
- * no homedir fallback). A missing directory yields no personas and no warnings;
- * malformed files are skipped and reported in `warnings`.
+ * Load personas from pi's two agent roots — the global agent dir and the project's `<cwd>/.pi/`.
+ * Global personas come first in filename order, then project-only personas; a project persona that
+ * collides with a global name replaces it in place, keeping the global slot. This parallels the
+ * warning order, which lists global warnings before project ones. On a collision the project
+ * persona wins, so each name appears exactly once. Each directory is scanned independently: a
+ * missing one contributes nothing; malformed files are skipped and reported in `warnings`.
+ * `agentDir` defaults to pi core's `getAgentDir()` (the `PI_CODING_AGENT_DIR` override, else `~/.pi/agent`).
  */
-export function loadPersonas(cwd: string): { personas: Persona[]; warnings: string[] } {
-	const dir = join(cwd, ".pi", AGENTS_DIRNAME);
+export function loadPersonas(
+	cwd: string,
+	agentDir: string = getAgentDir(),
+): { personas: Persona[]; warnings: string[] } {
+	const fromGlobal = loadPersonasFromDir(join(agentDir, AGENTS_DIRNAME));
+	const fromProject = loadPersonasFromDir(join(cwd, ".pi", AGENTS_DIRNAME));
+	// Dedupe by name with project precedence: seed the map with the global personas, then let the
+	// project personas overwrite any shared name, so a collision resolves to the project file and
+	// each name appears exactly once.
+	const byName = new Map<string, Persona>();
+	for (const persona of fromGlobal.personas) byName.set(persona.name, persona);
+	for (const persona of fromProject.personas) byName.set(persona.name, persona);
+	return {
+		personas: [...byName.values()],
+		warnings: [...fromGlobal.warnings, ...fromProject.warnings],
+	};
+}
+
+/**
+ * Scan a single `agents/` directory for `*.md` personas in filename order. A missing directory
+ * yields no personas and no warnings; an unlistable directory or a malformed/unreadable file is
+ * skipped and reported in `warnings`.
+ */
+function loadPersonasFromDir(dir: string): { personas: Persona[]; warnings: string[] } {
 	if (!existsSync(dir)) return { personas: [], warnings: [] };
 	const personas: Persona[] = [];
 	const warnings: string[] = [];
@@ -97,7 +126,7 @@ export function loadPersonas(cwd: string): { personas: Persona[]; warnings: stri
 	try {
 		entries = readdirSync(dir);
 	} catch (error) {
-		// .pi/agents is a file, unreadable, or otherwise unlistable: warn rather than throw.
+		// dir is a file, unreadable, or otherwise unlistable: warn rather than throw.
 		return { personas, warnings: [`skipping ${dir}: ${messageOf(error)}`] };
 	}
 	for (const file of entries.filter((name) => name.endsWith(".md")).sort()) {

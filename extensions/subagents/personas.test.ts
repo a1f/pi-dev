@@ -111,7 +111,8 @@ test("resolveDispatch treats an unrecognized first token as part of the task, no
 });
 
 test("loadPersonas returns valid personas in filename order and warns about a malformed file", () => {
-	const { personas, warnings } = loadPersonas(workspace);
+	// Isolate the project source: point the global agent dir at a path with no agents/ subdir.
+	const { personas, warnings } = loadPersonas(workspace, join(here, "fixtures", "no-such-agent-dir"));
 	assert.deepEqual(
 		personas.map((persona) => persona.name),
 		["reviewer", "summarizer"],
@@ -131,7 +132,8 @@ test("loadPersonas skips a .md entry that is a directory, warning instead of thr
 		writeFileSync(join(agents, "valid.md"), "---\nname: valid\ndescription: A real persona.\n---\nBody.");
 		mkdirSync(join(agents, "notapersona.md")); // a directory whose name ends in .md → readFileSync throws EISDIR
 
-		const { personas, warnings } = loadPersonas(root);
+		// Point the global agent dir at a sibling with no agents/ subdir so only the project source is scanned.
+		const { personas, warnings } = loadPersonas(root, join(root, "agent"));
 		assert.deepEqual(
 			personas.map((persona) => persona.name),
 			["valid"],
@@ -144,7 +146,135 @@ test("loadPersonas skips a .md entry that is a directory, warning instead of thr
 });
 
 test("loadPersonas returns nothing for a cwd without a .pi/agents directory", () => {
-	const { personas, warnings } = loadPersonas(join(here, "fixtures", "no-such-workspace"));
+	// Both sources absent: no project .pi/agents, and a global dir with no agents/ subdir → nothing loads.
+	const { personas, warnings } = loadPersonas(join(here, "fixtures", "no-such-workspace"), join(here, "fixtures", "no-such-agent-dir"));
 	assert.deepEqual(personas, []);
 	assert.deepEqual(warnings, []);
+});
+
+test("loadPersonas loads a persona from the global agent dir when the project has no .pi/agents", () => {
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// A project cwd that exists but has no .pi/agents of its own — the only source is the global one.
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+
+		// pi's global agent root holds one valid persona under its agents/ subdirectory.
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "globalcoder.md"),
+			"---\nname: globalcoder\ndescription: A globally-installed coder.\n---\nYou are a coder.",
+		);
+
+		const { personas, warnings } = loadPersonas(cwd, agentDir);
+		assert.deepEqual(
+			personas.map((persona) => persona.name),
+			["globalcoder"],
+		);
+		assert.deepEqual(warnings, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("loadPersonas prefers the project persona on a name collision and lists it only once", () => {
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// Both the project and the global agent dir define a persona named "shared"; project wins.
+		const cwd = join(root, "project");
+		const projectAgents = join(cwd, ".pi", "agents");
+		mkdirSync(projectAgents, { recursive: true });
+		writeFileSync(
+			join(projectAgents, "shared.md"),
+			"---\nname: shared\ndescription: Project shared persona.\n---\nProject body.",
+		);
+
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "shared.md"),
+			"---\nname: shared\ndescription: Global shared persona.\n---\nGlobal body.",
+		);
+		writeFileSync(
+			join(globalAgents, "globalonly.md"),
+			"---\nname: globalonly\ndescription: A global-only persona.\n---\nGlobal-only body.",
+		);
+
+		const { personas } = loadPersonas(cwd, agentDir);
+
+		// The colliding name yields exactly one persona, resolved to the project file.
+		assert.equal(personas.filter((persona) => persona.name === "shared").length, 1);
+		const shared = personas.find((persona) => persona.name === "shared");
+		assert.equal(shared?.source, join(cwd, ".pi", "agents", "shared.md"));
+
+		// A persona that exists only in the global dir still loads.
+		assert.ok(personas.some((persona) => persona.name === "globalonly"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("loadPersonas skips a malformed file in the global agent dir and reports it in warnings", () => {
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// A project cwd that exists but has no .pi/agents of its own — the only source is the global one.
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+
+		// The global agent root holds one valid persona plus a malformed file (no `---` fence).
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "globalcoder.md"),
+			"---\nname: globalcoder\ndescription: A globally-installed coder.\n---\nYou are a coder.",
+		);
+		writeFileSync(join(globalAgents, "broken.md"), "no frontmatter fence here");
+
+		const { personas, warnings } = loadPersonas(cwd, agentDir);
+		assert.deepEqual(
+			personas.map((persona) => persona.name),
+			["globalcoder"],
+		);
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0] ?? "", /broken\.md/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("loadPersonas resolves the global agent dir from PI_CODING_AGENT_DIR when called with a single argument", () => {
+	// Exercises the production default: with no agentDir argument, the global dir comes from
+	// getAgentDir(), which reads PI_CODING_AGENT_DIR. Save/restore the env so the test is isolated.
+	const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const root = mkdtempSync(join(tmpdir(), "personas-"));
+	try {
+		// The env-pointed global agent dir (absolute) holds one valid persona under its agents/.
+		const agentDir = join(root, "agent");
+		const globalAgents = join(agentDir, "agents");
+		mkdirSync(globalAgents, { recursive: true });
+		writeFileSync(
+			join(globalAgents, "envcoder.md"),
+			"---\nname: envcoder\ndescription: A persona under the env-pointed global dir.\n---\nYou are a coder.",
+		);
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		// A project cwd with no .pi/agents of its own, so the single-argument call's only source is
+		// the global dir that the default getAgentDir() resolution derives from the env var.
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+
+		const { personas } = loadPersonas(cwd);
+		assert.deepEqual(
+			personas.map((persona) => persona.name),
+			["envcoder"],
+		);
+	} finally {
+		if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+		rmSync(root, { recursive: true, force: true });
+	}
 });
